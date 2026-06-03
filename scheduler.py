@@ -62,12 +62,22 @@ def parse_date_text(date_text):
     elif "недел" in date_text:
         return (today - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S+0300")
     else:
-        # Try to extract number of days
         nums = re.findall(r'\d+', date_text)
         if nums:
             days = int(nums[0])
             return (today - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S+0300")
     return today.strftime("%Y-%m-%dT%H:%M:%S+0300")
+
+def matches_query(vacancy_name, query):
+    """Check that ALL words from query appear in vacancy name (case-insensitive, any order)."""
+    if not vacancy_name or not query:
+        return False
+    name_lower = vacancy_name.lower()
+    # Split query by spaces and remove empty parts
+    words = [w.strip() for w in query.lower().split() if w.strip()]
+    if not words:
+        return False
+    return all(word in name_lower for word in words)
 
 def fetch_vacancies_api(query, area_id, token, per_page=20):
     url = "https://api.hh.ru/vacancies"
@@ -82,7 +92,11 @@ def fetch_vacancies_api(query, area_id, token, per_page=20):
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data.get("items", [])
+            items = data.get("items", [])
+            # Post-filter: all query words must be in vacancy name
+            filtered = [item for item in items if matches_query(item.get("name", ""), query)]
+            print("[API] Получено {}, после фильтра по названию: {}".format(len(items), len(filtered)))
+            return filtered
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") if e.read() else ""
         print("[API Error] {}: {} — body: {}".format(query, e, body[:500]))
@@ -112,7 +126,11 @@ def fetch_vacancies_html(query, area_id):
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             html = resp.read().decode("utf-8")
-            return parse_html_vacancies(html)
+            items = parse_html_vacancies(html)
+            # Post-filter: all query words must be in vacancy name
+            filtered = [item for item in items if matches_query(item.get("name", ""), query)]
+            print("[HTML] Получено {}, после фильтра по названию: {}".format(len(items), len(filtered)))
+            return filtered
     except Exception as e:
         print("[HTML Error] {}: {}".format(query, e))
         return []
@@ -122,19 +140,16 @@ def parse_html_vacancies(html):
     soup = BeautifulSoup(html, "html.parser")
     vacancies = []
 
-    # Find all vacancy cards
     cards = soup.find_all("div", attrs={"data-qa": "vacancy-serp__vacancy"})
     if not cards:
-        # Try alternative selectors
         cards = soup.find_all("div", class_=re.compile(r"vacancy-serp-item"))
     if not cards:
         cards = soup.find_all("div", class_=re.compile(r"serp-item"))
 
-    print("[HTML Parser] Found {} cards".format(len(cards)))
+    print("[HTML Parser] Найдено {} карточек".format(len(cards)))
 
     for card in cards:
         try:
-            # Extract vacancy ID from URL
             link_tag = card.find("a", attrs={"data-qa": "vacancy-serp__vacancy-title"})
             if not link_tag:
                 link_tag = card.find("a", href=re.compile(r"/vacancy/\d+"))
@@ -147,19 +162,14 @@ def parse_html_vacancies(html):
                 continue
             vid = id_match.group(1)
 
-            # Title
             title = link_tag.get_text(strip=True) if link_tag else "Без названия"
-
-            # URL
             url = href if href.startswith("http") else "https://hh.ru{}".format(href)
 
-            # Employer
             emp_tag = card.find("a", attrs={"data-qa": "vacancy-serp__vacancy-employer"})
             if not emp_tag:
                 emp_tag = card.find("div", class_=re.compile(r"employer"))
             employer = emp_tag.get_text(strip=True) if emp_tag else "Неизвестный"
 
-            # Salary
             sal_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-compensation"})
             if not sal_tag:
                 sal_tag = card.find("span", class_=re.compile(r"compensation"))
@@ -174,7 +184,6 @@ def parse_html_vacancies(html):
                     else:
                         salary = {"from": nums_clean[0], "currency": "RUR"}
 
-            # Published date
             date_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-date"})
             if not date_tag:
                 date_tag = card.find("span", class_=re.compile(r"date"))
@@ -190,7 +199,7 @@ def parse_html_vacancies(html):
                 "alternate_url": url,
             })
         except Exception as e:
-            print("[HTML Parser] Card parse error: {}".format(e))
+            print("[HTML Parser] Ошибка парсинга карточки: {}".format(e))
             continue
 
     return vacancies
@@ -199,7 +208,7 @@ def fetch_vacancies(query, area_id, token, per_page=20):
     items = fetch_vacancies_api(query, area_id, token, per_page)
     if items is not None:
         return items
-    print("[Fallback] API failed, trying HTML parsing...")
+    print("[Fallback] API не сработал, пробуем HTML-парсинг...")
     return fetch_vacancies_html(query, area_id)
 
 def send_telegram(token, chat_id, message):
