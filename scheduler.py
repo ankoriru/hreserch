@@ -32,6 +32,17 @@ def format_salary(vacancy):
         parts.append(salary["currency"])
     return " ".join(parts) if parts else "з/п не указана"
 
+def format_datetime(published_at):
+    """Format ISO datetime to Russian date+time."""
+    if not published_at:
+        return ""
+    try:
+        # published_at: 2026-06-03T14:30:00+0300
+        dt = datetime.fromisoformat(published_at.replace("+0300", "+03:00"))
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return published_at[:16].replace("T", " ")
+
 def fetch_vacancies(query, area_id, per_page=100):
     url = "https://api.hh.ru/vacancies"
     params = {
@@ -41,7 +52,6 @@ def fetch_vacancies(query, area_id, per_page=100):
         "per_page": per_page,
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
-    print("[API URL] {}".format(full_url))
     req = urllib.request.Request(full_url, headers=HEADERS)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -83,8 +93,11 @@ def run_monitor_job():
 
     today = datetime.now()
     date_str = today.strftime("%Y-%m-%d")
-    # Filter: keep only vacancies published today
-    today_start = "{}T00:00:00".format(date_str)
+
+    # Determine cutoff date based on search_period
+    search_period = int(cfg.get("search_period", 1))
+    cutoff_date = (today - timedelta(days=search_period - 1)).strftime("%Y-%m-%d")
+    print("[Scheduler] Period: {} day(s), cutoff: {}".format(search_period, cutoff_date))
 
     sent_ids = set(cfg.get("sent_vacancies", []))
     all_vacancies = []
@@ -96,12 +109,12 @@ def run_monitor_job():
         for item in items:
             vid = item.get("id")
             published = item.get("published_at", "")[:10]
-            if vid and vid not in seen_ids and published == date_str:
+            if vid and vid not in seen_ids and published >= cutoff_date:
                 seen_ids.add(vid)
                 all_vacancies.append(item)
 
     new_vacancies = [v for v in all_vacancies if v.get("id") not in sent_ids]
-    print("[Scheduler] Total today: {}, New: {}".format(len(all_vacancies), len(new_vacancies)))
+    print("[Scheduler] Total in period: {}, New: {}".format(len(all_vacancies), len(new_vacancies)))
 
     if not new_vacancies:
         cfg["sent_vacancies"] = sorted(sent_ids | seen_ids)
@@ -111,6 +124,7 @@ def run_monitor_job():
     # Build text report
     lines = []
     lines.append("Novye vakansii IT-rukovoditelej v Moskve -- {}".format(date_str))
+    lines.append("Period: {} dnja (s {} po {})".format(search_period, cutoff_date, date_str))
     lines.append("Najdeno: {}".format(len(new_vacancies)))
     lines.append("")
     for v in new_vacancies:
@@ -118,11 +132,11 @@ def run_monitor_job():
         employer = v.get("employer", {}).get("name", "Neizvestnyj")
         url = v.get("alternate_url", "")
         salary = format_salary(v)
-        published = v.get("published_at", "")[:10]
+        published = format_datetime(v.get("published_at", ""))
         lines.append("* {}".format(title))
         lines.append("  Kompanija: {}".format(employer))
         lines.append("  Zarplata: {}".format(salary))
-        lines.append("  Data publikacii: {}".format(published))
+        lines.append("  Data i vremja publikacii: {}".format(published))
         lines.append("  Ssylka: {}".format(url))
         lines.append("")
 
@@ -138,12 +152,12 @@ def run_monitor_job():
         employer = v.get("employer", {}).get("name", "Neizvestnyj")
         url = v.get("alternate_url", "")
         salary = format_salary(v)
-        published = v.get("published_at", "")[:10]
+        published = format_datetime(v.get("published_at", ""))
         items_html.append(
             '<div class="vacancy"><h3><a href="{}" target="_blank">{}</a></h3>'
             '<p><strong>Kompanija:</strong> {}</p>'
             '<p><strong>Zarplata:</strong> {}</p>'
-            '<p><strong>Data publikacii:</strong> {}</p>'
+            '<p><strong>Data i vremja publikacii:</strong> {}</p>'
             '<p><a href="{}" target="_blank">Otkryt na hh.ru &rarr;</a></p></div>'
             .format(url, title, employer, salary, published, url)
         )
@@ -167,7 +181,7 @@ def run_monitor_job():
         '</head>',
         '<body>',
         '<h1>Novye vakansii IT-rukovoditelej v Moskve</h1>',
-        '<p>Data: <strong>{}</strong> | Najdeno: <strong>{}</strong></p>'.format(date_str, len(new_vacancies)),
+        '<p>Period: <strong>{} dnja</strong> (s {} po {}) | Najdeno: <strong>{}</strong></p>'.format(search_period, cutoff_date, date_str, len(new_vacancies)),
         "\n".join(items_html),
         '<p class="meta">Sformirovano avtomaticheski cherez API hh.ru</p>',
         '</body>',
@@ -184,7 +198,7 @@ def run_monitor_job():
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if token and chat_id:
         MAX_LEN = 4000
-        header = "Novye vakansii IT-rukovoditelej v Moskve\nData: {}\nNajdeno: {}\n\n".format(date_str, len(new_vacancies))
+        header = "Novye vakansii IT-rukovoditelej v Moskve\nPeriod: {} dnja (s {} po {})\nNajdeno: {}\n\n".format(search_period, cutoff_date, date_str, len(new_vacancies))
         messages = []
         current = header
         for v in new_vacancies:
@@ -192,11 +206,13 @@ def run_monitor_job():
                 "* {}\n"
                 "  Kompanija: {}\n"
                 "  Zarplata: {}\n"
+                "  Data i vremja: {}\n"
                 "  Ssylka: {}\n\n"
             ).format(
                 v.get("name", ""),
                 v.get("employer", {}).get("name", ""),
                 format_salary(v),
+                format_datetime(v.get("published_at", "")),
                 v.get("alternate_url", "")
             )
             if len(current) + len(block) > MAX_LEN:

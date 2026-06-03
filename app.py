@@ -62,7 +62,10 @@ def dashboard():
 
     telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
 
-    return render_template("dashboard.html", cfg=cfg, reports=report_list, telegram_ok=telegram_ok)
+    period_labels = {1: "Сутки", 3: "3 дня", 7: "Неделя", 30: "Месяц"}
+    period_label = period_labels.get(int(cfg.get("search_period", 1)), "Сутки")
+
+    return render_template("dashboard.html", cfg=cfg, reports=report_list, telegram_ok=telegram_ok, period_label=period_label)
 
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
@@ -78,6 +81,7 @@ def settings():
         cfg["area_id"] = request.form.get("area_id", "1").strip()
         cfg["per_page"] = int(request.form.get("per_page", 100))
         cfg["schedule_time"] = time_str
+        cfg["search_period"] = int(request.form.get("search_period", 1))
         cfg["enabled"] = request.form.get("enabled") == "on"
         cfg["only_workdays"] = request.form.get("only_workdays") == "on"
 
@@ -118,6 +122,7 @@ def api_status():
         "only_workdays": cfg.get("only_workdays", True),
         "queries_count": len(cfg.get("search_queries", [])),
         "telegram_ok": telegram_ok,
+        "search_period": cfg.get("search_period", 1),
     })
 
 @app.route("/api/reports")

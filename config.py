@@ -5,8 +5,6 @@ from pathlib import Path
 CONFIG_FILE = Path("config.json")
 
 DEFAULT_CONFIG = {
-    "telegram_bot_token": "",
-    "telegram_chat_id": "",
     "search_queries": [
         "ИТ директор",
         "Руководитель ИТ",
@@ -20,6 +18,7 @@ DEFAULT_CONFIG = {
     "area_id": "1",
     "per_page": 100,
     "schedule_time": "09:00",
+    "search_period": 1,
     "enabled": True,
     "only_workdays": True,
     "sent_vacancies": [],
@@ -29,7 +28,6 @@ def load_config():
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            # Merge with defaults for missing keys
             for key, val in DEFAULT_CONFIG.items():
                 if key not in data:
                     data[key] = val
