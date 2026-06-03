@@ -31,13 +31,12 @@ def format_salary(vacancy):
         parts.append(salary["currency"])
     return " ".join(parts) if parts else "з/п не указана"
 
-def fetch_vacancies(query, area_id, date_from, date_to, per_page=100):
+def fetch_vacancies(query, area_id, period=1, per_page=100):
     url = "https://api.hh.ru/vacancies"
     params = {
         "text": query,
         "area": area_id,
-        "date_from": date_from,
-        "date_to": date_to,
+        "period": period,
         "order_by": "publication_time",
         "per_page": per_page,
     }
@@ -83,15 +82,13 @@ def run_monitor_job():
 
     today = datetime.now()
     date_str = today.strftime("%Y-%m-%d")
-    date_from = "{}T00:00:00+03:00".format(date_str)
-    date_to = "{}T23:59:59+03:00".format(date_str)
 
     sent_ids = set(cfg.get("sent_vacancies", []))
     all_vacancies = []
     seen_ids = set()
 
     for query in cfg.get("search_queries", []):
-        items = fetch_vacancies(query, cfg["area_id"], date_from, date_to, cfg["per_page"])
+        items = fetch_vacancies(query, cfg["area_id"], period=1, per_page=cfg["per_page"])
         print('[Scheduler] Query "{}" -> {} items'.format(query, len(items)))
         for item in items:
             vid = item.get("id")
@@ -219,6 +216,9 @@ def run_monitor_job():
 scheduler = BackgroundScheduler()
 
 def init_scheduler():
+    if scheduler.running:
+        print("[Scheduler] Already running.")
+        return
     cfg = load_config()
     time_str = cfg.get("schedule_time", "09:00")
     try:
@@ -232,6 +232,12 @@ def init_scheduler():
 def update_schedule(new_time):
     try:
         h, m = map(int, new_time.split(":"))
-        scheduler.reschedule_job('vacancy_job', trigger='cron', hour=h, minute=m)
+        job = scheduler.get_job('vacancy_job')
+        if job:
+            scheduler.reschedule_job('vacancy_job', trigger='cron', hour=h, minute=m)
+            print("[Scheduler] Rescheduled to {}:{}".format(h, m))
+        else:
+            scheduler.add_job(run_monitor_job, 'cron', hour=h, minute=m, id='vacancy_job')
+            print("[Scheduler] Added new job at {}:{}".format(h, m))
     except Exception as e:
         print("[Scheduler] Failed to reschedule: {}".format(e))

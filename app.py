@@ -14,6 +14,9 @@ app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production-12345")
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS_HASH = os.environ.get("ADMIN_PASS_HASH", generate_password_hash("admin"))
 
+# Initialize scheduler for gunicorn
+init_scheduler()
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -114,6 +117,5 @@ def api_reports():
     return jsonify([{"date": r.stem.replace("vacancies_", ""), "filename": r.name} for r in reports])
 
 if __name__ == "__main__":
-    init_scheduler()
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port, debug=False)
