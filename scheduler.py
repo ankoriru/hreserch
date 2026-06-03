@@ -33,7 +33,6 @@ def format_salary(vacancy):
     return " ".join(parts) if parts else "з/п не указана"
 
 def format_datetime(published_at):
-    """Format ISO datetime to Russian date+time."""
     if not published_at:
         return ""
     try:
@@ -47,7 +46,8 @@ def fetch_vacancies(query, area_id, per_page=20):
     params = {
         "text": query,
         "area": area_id,
-        "per_page": per_page,
+        "page": 0,
+        "per_page": min(per_page, 20),  # API limit for public access
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
     print("[API URL] {}".format(full_url))
@@ -56,6 +56,11 @@ def fetch_vacancies(query, area_id, per_page=20):
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data.get("items", [])
+    except urllib.error.HTTPError as e:
+        # Read error body for 400/403/etc
+        body = e.read().decode("utf-8") if e.read() else ""
+        print("[API Error] {}: {} — body: {}".format(query, e, body[:500]))
+        return []
     except Exception as e:
         print("[API Error] {}: {}".format(query, e))
         return []
@@ -93,7 +98,6 @@ def run_monitor_job():
     today = datetime.now()
     date_str = today.strftime("%Y-%m-%d")
 
-    # Determine cutoff date based on search_period
     search_period = int(cfg.get("search_period", 1))
     cutoff_date = (today - timedelta(days=search_period - 1)).strftime("%Y-%m-%d")
     print("[Scheduler] Period: {} day(s), cutoff: {}".format(search_period, cutoff_date))
@@ -103,7 +107,7 @@ def run_monitor_job():
     seen_ids = set()
 
     for query in cfg.get("search_queries", []):
-        items = fetch_vacancies(query, cfg["area_id"], per_page=cfg["per_page"])
+        items = fetch_vacancies(query, cfg["area_id"], per_page=20)
         print('[Scheduler] Query "{}" -> {} raw items'.format(query, len(items)))
         for item in items:
             vid = item.get("id")
