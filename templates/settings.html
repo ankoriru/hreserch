@@ -16,18 +16,27 @@
     <div class="card-body p-4">
         <h5 class="card-title mb-3">Поисковые параметры</h5>
         <div class="row">
-            <div class="col-md-4 mb-3">
+            <div class="col-md-3 mb-3">
                 <label class="form-label">Регион (area ID)</label>
                 <input type="text" name="area_id" class="form-control" value="{{ cfg.area_id }}" required>
                 <div class="form-text">1 = Москва, 2 = СПб</div>
             </div>
-            <div class="col-md-4 mb-3">
+            <div class="col-md-3 mb-3">
                 <label class="form-label">Вакансий на странице</label>
                 <input type="number" name="per_page" class="form-control" value="{{ cfg.per_page }}" min="1" max="100" required>
             </div>
-            <div class="col-md-4 mb-3">
+            <div class="col-md-3 mb-3">
                 <label class="form-label">Время запуска (ЧЧ:ММ)</label>
                 <input type="text" name="schedule_time" class="form-control" value="{{ cfg.schedule_time }}" pattern="[0-9]{2}:[0-9]{2}" required>
+            </div>
+            <div class="col-md-3 mb-3">
+                <label class="form-label">Период поиска</label>
+                <select name="search_period" class="form-select" required>
+                    <option value="1" {{ 'selected' if cfg.search_period == 1 else '' }}>Сутки</option>
+                    <option value="3" {{ 'selected' if cfg.search_period == 3 else '' }}>3 дня</option>
+                    <option value="7" {{ 'selected' if cfg.search_period == 7 else '' }}>Неделя</option>
+                    <option value="30" {{ 'selected' if cfg.search_period == 30 else '' }}>Месяц</option>
+                </select>
             </div>
         </div>
 
