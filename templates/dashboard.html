@@ -20,16 +20,16 @@
     <div class="col-md-3">
         <div class="card text-white bg-info">
             <div class="card-body">
-                <h5 class="card-title">Время запуска</h5>
-                <p class="card-text fs-4">{{ cfg.schedule_time }}</p>
+                <h5 class="card-title">Время / Период</h5>
+                <p class="card-text fs-4">{{ cfg.schedule_time }} / {{ period_label }}</p>
             </div>
         </div>
     </div>
     <div class="col-md-3">
         <div class="card text-white bg-secondary">
             <div class="card-body">
-                <h5 class="card-title">Период</h5>
-                <p class="card-text fs-4">{{ period_label }}</p>
+                <h5 class="card-title">HH Token</h5>
+                <p class="card-text fs-4">{{ "✅" if hh_token_ok else "❌" }}</p>
             </div>
         </div>
     </div>
