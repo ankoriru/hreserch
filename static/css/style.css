@@ -1,1 +1,51 @@
+body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
 
+.card {
+    border: none;
+    border-radius: 12px;
+}
+
+.card .card-body {
+    border-radius: 12px;
+}
+
+.navbar-brand {
+    font-weight: 600;
+    letter-spacing: -0.3px;
+}
+
+.table-hover tbody tr:hover {
+    background-color: #f1f5f9;
+}
+
+.btn {
+    border-radius: 8px;
+    font-weight: 500;
+}
+
+.form-control {
+    border-radius: 8px;
+}
+
+.form-control:focus {
+    box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.15);
+}
+
+.alert {
+    border-radius: 10px;
+    border: none;
+}
+
+/* Login page */
+.login-card {
+    border-radius: 16px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.08);
+}
+
+/* Status cards */
+.card.bg-primary { background: linear-gradient(135deg, #0d6efd, #0a58ca) !important; }
+.card.bg-info { background: linear-gradient(135deg, #0dcaf0, #0aa2c0) !important; }
+.card.bg-secondary { background: linear-gradient(135deg, #6c757d, #565e64) !important; }
+.card.bg-dark { background: linear-gradient(135deg, #212529, #1a1d20) !important; }
