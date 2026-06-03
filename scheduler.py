@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
@@ -10,9 +11,21 @@ from config import load_config, save_config
 OUTPUT_DIR = Path("reports")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+# Realistic browser headers
 HEADERS = {
-    "User-Agent": "api-test-agent (web-app@example.com)",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Accept": "application/json",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://hh.ru/",
+    "Connection": "keep-alive",
+}
+
+HTML_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9",
+    "Referer": "https://hh.ru/",
 }
 
 def is_workday():
@@ -41,13 +54,13 @@ def format_datetime(published_at):
     except Exception:
         return published_at[:16].replace("T", " ")
 
-def fetch_vacancies(query, area_id, per_page=20):
+def fetch_vacancies_api(query, area_id, per_page=20):
+    """Try API first."""
     url = "https://api.hh.ru/vacancies"
     params = {
         "text": query,
         "area": area_id,
-        "page": 0,
-        "per_page": min(per_page, 20),  # API limit for public access
+        "per_page": per_page,
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
     print("[API URL] {}".format(full_url))
@@ -57,13 +70,102 @@ def fetch_vacancies(query, area_id, per_page=20):
             data = json.loads(resp.read().decode("utf-8"))
             return data.get("items", [])
     except urllib.error.HTTPError as e:
-        # Read error body for 400/403/etc
         body = e.read().decode("utf-8") if e.read() else ""
         print("[API Error] {}: {} — body: {}".format(query, e, body[:500]))
-        return []
+        return None
     except Exception as e:
         print("[API Error] {}: {}".format(query, e))
+        return None
+
+def fetch_vacancies_html(query, area_id):
+    """Fallback: parse HTML search page."""
+    url = "https://hh.ru/search/vacancy"
+    params = {
+        "text": query,
+        "area": area_id,
+        "order_by": "publication_time",
+        "search_period": 3,
+        "items_on_page": 20,
+    }
+    full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
+    print("[HTML URL] {}".format(full_url))
+    req = urllib.request.Request(full_url, headers=HTML_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            html = resp.read().decode("utf-8")
+            return parse_html_vacancies(html)
+    except Exception as e:
+        print("[HTML Error] {}: {}".format(query, e))
         return []
+
+def parse_html_vacancies(html):
+    """Parse vacancies from hh.ru HTML."""
+    vacancies = []
+    # Find all vacancy cards
+    # Pattern: data-qa="vacancy-serp__vacancy" or similar
+    cards = re.findall(r'data-qa="vacancy-serp__vacancy"[^>]*>(.*?)</div>\s*</div>', html, re.DOTALL)
+    if not cards:
+        # Try broader pattern
+        cards = re.findall(r'<div[^>]*class="[^"]*vacancy-serp-item[^"]*"[^>]*>(.*?)</div>\s*</div>', html, re.DOTALL)
+
+    print("[HTML Parser] Found {} cards".format(len(cards)))
+
+    for card in cards:
+        # Extract vacancy ID from URL
+        id_match = re.search(r'/vacancy/(\d+)', card)
+        if not id_match:
+            continue
+        vid = id_match.group(1)
+
+        # Title
+        title_match = re.search(r'<a[^>]*data-qa="vacancy-serp__vacancy-title"[^>]*>(.*?)</a>', card, re.DOTALL)
+        title = re.sub(r'<[^>]+>', '', title_match.group(1)).strip() if title_match else "Без названия"
+
+        # URL
+        url_match = re.search(r'href="(https://hh\.ru/vacancy/\d+)"', card)
+        url = url_match.group(1) if url_match else "https://hh.ru/vacancy/{}".format(vid)
+
+        # Employer
+        emp_match = re.search(r'data-qa="vacancy-serp__vacancy-employer"[^>]*>(.*?)</a>', card, re.DOTALL)
+        employer = re.sub(r'<[^>]+>', '', emp_match.group(1)).strip() if emp_match else "Неизвестный"
+
+        # Salary
+        sal_match = re.search(r'data-qa="vacancy-serp__vacancy-compensation"[^>]*>(.*?)</span>', card, re.DOTALL)
+        salary_raw = re.sub(r'<[^>]+>', '', sal_match.group(1)).strip() if sal_match else None
+        salary = None
+        if salary_raw:
+            # Parse "от 400 000 до 600 000 руб." or "400 000 – 600 000 руб."
+            parts = {}
+            nums = re.findall(r'[\d\s]+', salary_raw)
+            nums_clean = [int(n.replace(' ', '')) for n in nums if n.strip().replace(' ', '').isdigit()]
+            if nums_clean:
+                if len(nums_clean) >= 2:
+                    parts = {"from": nums_clean[0], "to": nums_clean[1], "currency": "RUR"}
+                else:
+                    parts = {"from": nums_clean[0], "currency": "RUR"}
+            salary = parts if parts else None
+
+        # Published date (HTML doesn't have exact time, use today)
+        published = datetime.now().strftime("%Y-%m-%dT12:00:00+0300")
+
+        vacancies.append({
+            "id": vid,
+            "name": title,
+            "employer": {"name": employer},
+            "salary": salary,
+            "published_at": published,
+            "alternate_url": url,
+        })
+
+    return vacancies
+
+def fetch_vacancies(query, area_id, per_page=20):
+    """Try API, fallback to HTML."""
+    items = fetch_vacancies_api(query, area_id, per_page)
+    if items is not None:
+        return items
+    print("[Fallback] API failed, trying HTML parsing...")
+    return fetch_vacancies_html(query, area_id)
 
 def send_telegram(token, chat_id, message):
     if not token or not chat_id:
@@ -108,7 +210,7 @@ def run_monitor_job():
 
     for query in cfg.get("search_queries", []):
         items = fetch_vacancies(query, cfg["area_id"], per_page=20)
-        print('[Scheduler] Query "{}" -> {} raw items'.format(query, len(items)))
+        print('[Scheduler] Query "{}" -> {} items'.format(query, len(items)))
         for item in items:
             vid = item.get("id")
             published = item.get("published_at", "")[:10]
