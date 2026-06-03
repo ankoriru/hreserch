@@ -2,7 +2,7 @@ import json
 import os
 import urllib.request
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from config import load_config, save_config
@@ -32,16 +32,16 @@ def format_salary(vacancy):
         parts.append(salary["currency"])
     return " ".join(parts) if parts else "з/п не указана"
 
-def fetch_vacancies(query, area_id, search_period=1, per_page=100):
+def fetch_vacancies(query, area_id, per_page=100):
     url = "https://api.hh.ru/vacancies"
     params = {
         "text": query,
         "area": area_id,
-        "search_period": search_period,
         "order_by": "publication_time",
         "per_page": per_page,
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
+    print("[API URL] {}".format(full_url))
     req = urllib.request.Request(full_url, headers=HEADERS)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -83,22 +83,25 @@ def run_monitor_job():
 
     today = datetime.now()
     date_str = today.strftime("%Y-%m-%d")
+    # Filter: keep only vacancies published today
+    today_start = "{}T00:00:00".format(date_str)
 
     sent_ids = set(cfg.get("sent_vacancies", []))
     all_vacancies = []
     seen_ids = set()
 
     for query in cfg.get("search_queries", []):
-        items = fetch_vacancies(query, cfg["area_id"], search_period=1, per_page=cfg["per_page"])
-        print('[Scheduler] Query "{}" -> {} items'.format(query, len(items)))
+        items = fetch_vacancies(query, cfg["area_id"], per_page=cfg["per_page"])
+        print('[Scheduler] Query "{}" -> {} raw items'.format(query, len(items)))
         for item in items:
             vid = item.get("id")
-            if vid and vid not in seen_ids:
+            published = item.get("published_at", "")[:10]
+            if vid and vid not in seen_ids and published == date_str:
                 seen_ids.add(vid)
                 all_vacancies.append(item)
 
     new_vacancies = [v for v in all_vacancies if v.get("id") not in sent_ids]
-    print("[Scheduler] Total: {}, New: {}".format(len(all_vacancies), len(new_vacancies)))
+    print("[Scheduler] Total today: {}, New: {}".format(len(all_vacancies), len(new_vacancies)))
 
     if not new_vacancies:
         cfg["sent_vacancies"] = sorted(sent_ids | seen_ids)
