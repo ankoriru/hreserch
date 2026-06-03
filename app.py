@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from functools import wraps
@@ -58,18 +59,25 @@ def dashboard():
     for r in reports:
         date_part = r.stem.replace("vacancies_", "")
         report_list.append({"date": date_part, "filename": r.name})
-    return render_template("dashboard.html", cfg=cfg, reports=report_list)
+
+    telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
+
+    return render_template("dashboard.html", cfg=cfg, reports=report_list, telegram_ok=telegram_ok)
 
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
 def settings():
     cfg = load_config()
     if request.method == "POST":
-        cfg["telegram_bot_token"] = request.form.get("telegram_bot_token", "").strip()
-        cfg["telegram_chat_id"] = request.form.get("telegram_chat_id", "").strip()
+        # Validate time format
+        time_str = request.form.get("schedule_time", "09:00").strip()
+        if not re.match(r"^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$", time_str):
+            flash("Неверный формат времени. Используйте ЧЧ:ММ (00:00 - 23:59)", "danger")
+            return redirect(url_for("settings"))
+
         cfg["area_id"] = request.form.get("area_id", "1").strip()
         cfg["per_page"] = int(request.form.get("per_page", 100))
-        cfg["schedule_time"] = request.form.get("schedule_time", "09:00").strip()
+        cfg["schedule_time"] = time_str
         cfg["enabled"] = request.form.get("enabled") == "on"
         cfg["only_workdays"] = request.form.get("only_workdays") == "on"
 
@@ -81,7 +89,8 @@ def settings():
         flash("Настройки сохранены", "success")
         return redirect(url_for("settings"))
 
-    return render_template("settings.html", cfg=cfg)
+    telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
+    return render_template("settings.html", cfg=cfg, telegram_ok=telegram_ok)
 
 @app.route("/run-now", methods=["POST"])
 @login_required
@@ -102,11 +111,13 @@ def view_report(filename):
 @login_required
 def api_status():
     cfg = load_config()
+    telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
     return jsonify({
         "enabled": cfg.get("enabled", True),
         "schedule_time": cfg.get("schedule_time", "09:00"),
         "only_workdays": cfg.get("only_workdays", True),
         "queries_count": len(cfg.get("search_queries", [])),
+        "telegram_ok": telegram_ok,
     })
 
 @app.route("/api/reports")

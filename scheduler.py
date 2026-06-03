@@ -1,4 +1,5 @@
 import json
+import os
 import urllib.request
 import urllib.parse
 from datetime import datetime
@@ -31,12 +32,12 @@ def format_salary(vacancy):
         parts.append(salary["currency"])
     return " ".join(parts) if parts else "з/п не указана"
 
-def fetch_vacancies(query, area_id, period=1, per_page=100):
+def fetch_vacancies(query, area_id, search_period=1, per_page=100):
     url = "https://api.hh.ru/vacancies"
     params = {
         "text": query,
         "area": area_id,
-        "period": period,
+        "search_period": search_period,
         "order_by": "publication_time",
         "per_page": per_page,
     }
@@ -88,7 +89,7 @@ def run_monitor_job():
     seen_ids = set()
 
     for query in cfg.get("search_queries", []):
-        items = fetch_vacancies(query, cfg["area_id"], period=1, per_page=cfg["per_page"])
+        items = fetch_vacancies(query, cfg["area_id"], search_period=1, per_page=cfg["per_page"])
         print('[Scheduler] Query "{}" -> {} items'.format(query, len(items)))
         for item in items:
             vid = item.get("id")
@@ -175,9 +176,9 @@ def run_monitor_job():
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html)
 
-    # Send Telegram
-    token = cfg.get("telegram_bot_token", "")
-    chat_id = cfg.get("telegram_chat_id", "")
+    # Send Telegram (read from env)
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if token and chat_id:
         MAX_LEN = 4000
         header = "Novye vakansii IT-rukovoditelej v Moskve\nData: {}\nNajdeno: {}\n\n".format(date_str, len(new_vacancies))
@@ -205,6 +206,8 @@ def run_monitor_job():
         for i, msg in enumerate(messages, 1):
             ok = send_telegram(token, chat_id, msg)
             print("[Scheduler] Telegram part {}/{}: {}".format(i, len(messages), "OK" if ok else "FAIL"))
+    else:
+        print("[Scheduler] Telegram not configured (TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing)")
 
     # Save history
     new_ids = {v.get("id") for v in new_vacancies}
@@ -223,6 +226,8 @@ def init_scheduler():
     time_str = cfg.get("schedule_time", "09:00")
     try:
         hour, minute = map(int, time_str.split(":"))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError("Invalid time")
     except Exception:
         hour, minute = 9, 0
     scheduler.add_job(run_monitor_job, 'cron', hour=hour, minute=minute, id='vacancy_job')
@@ -232,6 +237,8 @@ def init_scheduler():
 def update_schedule(new_time):
     try:
         h, m = map(int, new_time.split(":"))
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError("Hours must be 0-23, minutes 0-59")
         job = scheduler.get_job('vacancy_job')
         if job:
             scheduler.reschedule_job('vacancy_job', trigger='cron', hour=h, minute=m)
