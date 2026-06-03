@@ -11,11 +11,9 @@ from scheduler import init_scheduler, run_monitor_job, update_schedule
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production-12345")
 
-# Admin credentials from env or default (change in production!)
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS_HASH = os.environ.get("ADMIN_PASS_HASH", generate_password_hash("admin"))
 
-# Initialize scheduler for gunicorn
 init_scheduler()
 
 def login_required(f):
@@ -59,40 +57,34 @@ def dashboard():
     for r in reports:
         date_part = r.stem.replace("vacancies_", "")
         report_list.append({"date": date_part, "filename": r.name})
-
     telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
-
+    hh_token_ok = bool(cfg.get("hh_access_token", "").strip())
     period_labels = {1: "Сутки", 3: "3 дня", 7: "Неделя", 30: "Месяц"}
     period_label = period_labels.get(int(cfg.get("search_period", 1)), "Сутки")
-
-    return render_template("dashboard.html", cfg=cfg, reports=report_list, telegram_ok=telegram_ok, period_label=period_label)
+    return render_template("dashboard.html", cfg=cfg, reports=report_list, telegram_ok=telegram_ok, hh_token_ok=hh_token_ok, period_label=period_label)
 
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
 def settings():
     cfg = load_config()
     if request.method == "POST":
-        # Validate time format
         time_str = request.form.get("schedule_time", "09:00").strip()
         if not re.match(r"^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$", time_str):
             flash("Неверный формат времени. Используйте ЧЧ:ММ (00:00 - 23:59)", "danger")
             return redirect(url_for("settings"))
-
         cfg["area_id"] = request.form.get("area_id", "1").strip()
         cfg["per_page"] = int(request.form.get("per_page", 100))
         cfg["schedule_time"] = time_str
         cfg["search_period"] = int(request.form.get("search_period", 1))
+        cfg["hh_access_token"] = request.form.get("hh_access_token", "").strip()
         cfg["enabled"] = request.form.get("enabled") == "on"
         cfg["only_workdays"] = request.form.get("only_workdays") == "on"
-
         queries_raw = request.form.get("search_queries", "")
         cfg["search_queries"] = [q.strip() for q in queries_raw.splitlines() if q.strip()]
-
         save_config(cfg)
         update_schedule(cfg["schedule_time"])
         flash("Настройки сохранены", "success")
         return redirect(url_for("settings"))
-
     telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
     return render_template("settings.html", cfg=cfg, telegram_ok=telegram_ok)
 
@@ -116,12 +108,14 @@ def view_report(filename):
 def api_status():
     cfg = load_config()
     telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
+    hh_token_ok = bool(cfg.get("hh_access_token", "").strip())
     return jsonify({
         "enabled": cfg.get("enabled", True),
         "schedule_time": cfg.get("schedule_time", "09:00"),
         "only_workdays": cfg.get("only_workdays", True),
         "queries_count": len(cfg.get("search_queries", [])),
         "telegram_ok": telegram_ok,
+        "hh_token_ok": hh_token_ok,
         "search_period": cfg.get("search_period", 1),
     })
 

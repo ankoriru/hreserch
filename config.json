@@ -1,0 +1,23 @@
+{
+  "search_queries": [
+    "ИТ директор",
+    "Руководитель ИТ",
+    "IT директор",
+    "IT director",
+    "Директор по информационным технологиям",
+    "Руководитель информационных технологий",
+    "CIO",
+    "Chief Information Officer"
+  ],
+  "area_id": "1",
+  "per_page": 100,
+  "schedule_time": "09:00",
+  "search_period": 1,
+  "enabled": true,
+  "only_workdays": true,
+  "sent_vacancies": [
+    "111",
+    "222",
+    "333"
+  ]
+}
