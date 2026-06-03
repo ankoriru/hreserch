@@ -36,8 +36,8 @@
     <div class="col-md-3">
         <div class="card text-white bg-dark">
             <div class="card-body">
-                <h5 class="card-title">Запросов</h5>
-                <p class="card-text fs-4">{{ cfg.search_queries|length }}</p>
+                <h5 class="card-title">Telegram</h5>
+                <p class="card-text fs-4">{{ "✅" if telegram_ok else "❌" }}</p>
             </div>
         </div>
     </div>
