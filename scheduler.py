@@ -11,7 +11,7 @@ OUTPUT_DIR = Path("reports")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 HEADERS = {
-    "User-Agent": "VacancyMonitor/1.0 (web-app@example.com)",
+    "User-Agent": "api-test-agent (web-app@example.com)",
     "Accept": "application/json",
 }
 
@@ -37,21 +37,20 @@ def format_datetime(published_at):
     if not published_at:
         return ""
     try:
-        # published_at: 2026-06-03T14:30:00+0300
         dt = datetime.fromisoformat(published_at.replace("+0300", "+03:00"))
         return dt.strftime("%d.%m.%Y %H:%M")
     except Exception:
         return published_at[:16].replace("T", " ")
 
-def fetch_vacancies(query, area_id, per_page=100):
+def fetch_vacancies(query, area_id, per_page=20):
     url = "https://api.hh.ru/vacancies"
     params = {
         "text": query,
         "area": area_id,
-        "order_by": "publication_time",
         "per_page": per_page,
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
+    print("[API URL] {}".format(full_url))
     req = urllib.request.Request(full_url, headers=HEADERS)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
