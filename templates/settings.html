@@ -3,23 +3,17 @@
 {% block content %}
 <h2 class="mb-4">⚙️ Настройки</h2>
 
+<div class="alert alert-info mb-4">
+    <strong>Telegram уведомления:</strong>
+    {% if telegram_ok %}
+        <span class="text-success">✅ Настроены (через переменные окружения Amvera)</span>
+    {% else %}
+        <span class="text-warning">⚠️ Не настроены</span> — добавьте <code>TELEGRAM_BOT_TOKEN</code> и <code>TELEGRAM_CHAT_ID</code> в переменные окружения на Amvera.
+    {% endif %}
+</div>
+
 <form method="POST" class="card shadow-sm">
     <div class="card-body p-4">
-        <h5 class="card-title mb-3">Telegram уведомления</h5>
-        <div class="row">
-            <div class="col-md-6 mb-3">
-                <label class="form-label">Bot Token</label>
-                <input type="text" name="telegram_bot_token" class="form-control" value="{{ cfg.telegram_bot_token }}" placeholder="123456:ABC...">
-                <div class="form-text">Получите у @BotFather</div>
-            </div>
-            <div class="col-md-6 mb-3">
-                <label class="form-label">Chat ID</label>
-                <input type="text" name="telegram_chat_id" class="form-control" value="{{ cfg.telegram_chat_id }}" placeholder="123456789 или @channel">
-                <div class="form-text">ID пользователя или канала</div>
-            </div>
-        </div>
-
-        <hr class="my-4">
         <h5 class="card-title mb-3">Поисковые параметры</h5>
         <div class="row">
             <div class="col-md-4 mb-3">
