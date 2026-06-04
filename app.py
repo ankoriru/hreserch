@@ -51,16 +51,39 @@ def logout():
 @login_required
 def dashboard():
     cfg = load_config()
+
+    # Combine file reports and history reports
     reports_dir = Path("reports")
-    reports = sorted(reports_dir.glob("*.html"), reverse=True)
+    file_reports = sorted(reports_dir.glob("*.html"), reverse=True)
+
+    # Build report list from files + history
     report_list = []
-    for r in reports:
+    seen_files = set()
+
+    for r in file_reports:
         date_part = r.stem.replace("vacancies_", "")
-        report_list.append({"date": date_part, "filename": r.name})
+        seen_files.add(r.name)
+        report_list.append({
+            "date": date_part,
+            "filename": r.name,
+            "source": "file"
+        })
+
+    # Add history reports that don't exist as files
+    for h in cfg.get("reports_history", [])[::-1]:
+        if h.get("filename_html") not in seen_files:
+            report_list.append({
+                "date": h.get("date"),
+                "filename": h.get("filename_html"),
+                "count": h.get("count"),
+                "source": "history"
+            })
+
     telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
     hh_token_ok = bool(cfg.get("hh_access_token", "").strip())
     period_labels = {1: "Сутки", 3: "3 дня", 7: "Неделя", 30: "Месяц"}
     period_label = period_labels.get(int(cfg.get("search_period", 1)), "Сутки")
+
     return render_template("dashboard.html", cfg=cfg, reports=report_list, telegram_ok=telegram_ok, hh_token_ok=hh_token_ok, period_label=period_label)
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -72,6 +95,7 @@ def settings():
         if not re.match(r"^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$", time_str):
             flash("Неверный формат времени. Используйте ЧЧ:ММ (00:00 - 23:59)", "danger")
             return redirect(url_for("settings"))
+
         cfg["area_id"] = request.form.get("area_id", "1").strip()
         cfg["per_page"] = int(request.form.get("per_page", 100))
         cfg["schedule_time"] = time_str
@@ -79,12 +103,17 @@ def settings():
         cfg["hh_access_token"] = request.form.get("hh_access_token", "").strip()
         cfg["enabled"] = request.form.get("enabled") == "on"
         cfg["only_workdays"] = request.form.get("only_workdays") == "on"
+
+        # CRITICAL FIX: properly parse textarea lines
         queries_raw = request.form.get("search_queries", "")
-        cfg["search_queries"] = [q.strip() for q in queries_raw.splitlines() if q.strip()]
+        # Split by newlines, strip each, filter empty
+        cfg["search_queries"] = [q.strip() for q in queries_raw.replace('\r\n', '\n').split('\n') if q.strip()]
+
         save_config(cfg)
         update_schedule(cfg["schedule_time"])
-        flash("Настройки сохранены", "success")
+        flash("Настройки сохранены. Запросы: {}".format(len(cfg["search_queries"])), "success")
         return redirect(url_for("settings"))
+
     telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
     # Prepare search_queries as newline-separated string for textarea
     search_queries_text = "\n".join(cfg.get("search_queries", []))
@@ -103,7 +132,23 @@ def run_now():
 @app.route("/reports/<filename>")
 @login_required
 def view_report(filename):
-    return send_from_directory("reports", filename)
+    # Check if file exists on disk
+    file_path = Path("reports") / filename
+    if file_path.exists():
+        return send_from_directory("reports", filename)
+
+    # Check if in history (for HTML reports)
+    cfg = load_config()
+    for h in cfg.get("reports_history", []):
+        if h.get("filename_html") == filename:
+            return h.get("html_content", "<html><body>Отчёт не найден</body></html>")
+
+    # Check TXT in history
+    for h in cfg.get("reports_history", []):
+        if h.get("filename_txt") == filename:
+            return h.get("txt_content", "Отчёт не найден"), 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+    return "Отчёт не найден", 404
 
 @app.route("/api/status")
 @login_required
@@ -124,14 +169,24 @@ def api_status():
 @app.route("/api/reports")
 @login_required
 def api_reports():
+    cfg = load_config()
     reports_dir = Path("reports")
-    reports = sorted(reports_dir.glob("*.html"), reverse=True)
-    return jsonify([{"date": r.stem.replace("vacancies_", ""), "filename": r.name} for r in reports])
+    file_reports = sorted(reports_dir.glob("*.html"), reverse=True)
+    result = []
+    for r in file_reports:
+        result.append({"date": r.stem.replace("vacancies_", ""), "filename": r.name, "source": "file"})
+    for h in cfg.get("reports_history", [])[::-1]:
+        result.append({
+            "date": h.get("date"),
+            "filename": h.get("filename_html"),
+            "count": h.get("count"),
+            "source": "history"
+        })
+    return jsonify(result)
 
 @app.route("/api/run", methods=["POST"])
 @login_required
 def api_run():
-    """Manual trigger for testing scheduler."""
     try:
         run_monitor_job()
         return jsonify({"status": "ok"})

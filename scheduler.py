@@ -71,6 +71,40 @@ def parse_date_text(date_text):
             return (today - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S+0300")
     return today.strftime("%Y-%m-%dT%H:%M:%S+0300")
 
+def parse_salary_text(text):
+    """Parse salary text like 'до 200 000 ₽', 'от 150 000 до 300 000 руб.'"""
+    if not text:
+        return None
+    # Extract all numbers
+    nums = re.findall(r'[\d\s\xa0]+', text)
+    nums_clean = []
+    for n in nums:
+        clean = n.replace(' ', '').replace('\xa0', '').replace('\u202f', '')
+        if clean.isdigit():
+            nums_clean.append(int(clean))
+    if not nums_clean:
+        return None
+    # Determine currency
+    currency = "RUR"
+    if 'USD' in text or '$' in text:
+        currency = "USD"
+    elif 'EUR' in text or '€' in text:
+        currency = "EUR"
+    # Determine from/to
+    text_lower = text.lower()
+    has_ot = 'от' in text_lower
+    has_do = 'до' in text_lower
+    if has_ot and has_do and len(nums_clean) >= 2:
+        return {"from": nums_clean[0], "to": nums_clean[1], "currency": currency}
+    elif has_ot:
+        return {"from": nums_clean[0], "currency": currency}
+    elif has_do:
+        return {"to": nums_clean[0], "currency": currency}
+    elif len(nums_clean) >= 2:
+        return {"from": nums_clean[0], "to": nums_clean[1], "currency": currency}
+    else:
+        return {"from": nums_clean[0], "currency": currency}
+
 def matches_query(vacancy_name, query):
     if not vacancy_name or not query:
         return False
@@ -162,28 +196,43 @@ def parse_html_vacancies(html):
             vid = id_match.group(1)
             title = link_tag.get_text(strip=True) if link_tag else "Без названия"
             url = href if href.startswith("http") else "https://hh.ru{}".format(href)
+
+            # Employer
             emp_tag = card.find("a", attrs={"data-qa": "vacancy-serp__vacancy-employer"})
             if not emp_tag:
                 emp_tag = card.find("div", class_=re.compile(r"employer"))
             employer = emp_tag.get_text(strip=True) if emp_tag else "Неизвестный"
-            sal_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-compensation"})
-            if not sal_tag:
-                sal_tag = card.find("span", class_=re.compile(r"compensation"))
-            salary_raw = sal_tag.get_text(strip=True) if sal_tag else None
+
+            # Salary — robust parsing
             salary = None
-            if salary_raw:
-                nums = re.findall(r'[\d\s]+', salary_raw)
-                nums_clean = [int(n.replace(' ', '').replace('\xa0', '')) for n in nums if n.strip().replace(' ', '').replace('\xa0', '').isdigit()]
-                if nums_clean:
-                    if len(nums_clean) >= 2:
-                        salary = {"from": nums_clean[0], "to": nums_clean[1], "currency": "RUR"}
-                    else:
-                        salary = {"from": nums_clean[0], "currency": "RUR"}
+            # Try data-qa first
+            sal_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-compensation"})
+            if sal_tag:
+                salary = parse_salary_text(sal_tag.get_text(strip=True))
+            # Try by class
+            if not salary:
+                for cls in ["compensation", "salary", "bloko-header-section-3", "bloko-text"]:
+                    sal_tag = card.find("span", class_=re.compile(r"{}".format(cls)))
+                    if sal_tag:
+                        salary = parse_salary_text(sal_tag.get_text(strip=True))
+                        if salary:
+                            break
+            # Fallback: search any text with currency symbol
+            if not salary:
+                for tag in card.find_all(string=re.compile(r'[\d\s\xa0\u202f]+[₽$€]|руб|USD|EUR|зарплата')):
+                    text = tag.strip()
+                    if text and len(text) < 150:
+                        salary = parse_salary_text(text)
+                        if salary:
+                            break
+
+            # Published date
             date_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-date"})
             if not date_tag:
                 date_tag = card.find("span", class_=re.compile(r"date"))
             date_text = date_tag.get_text(strip=True) if date_tag else None
             published = parse_date_text(date_text)
+
             vacancies.append({
                 "id": vid, "name": title, "employer": {"name": employer},
                 "salary": salary, "published_at": published, "alternate_url": url,
@@ -293,7 +342,7 @@ def run_monitor_job():
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(text_report)
 
-    # Build HTML report
+    # Build HTML report with "Back" button
     items_html = []
     for v in new_vacancies:
         title = v.get("name", "Без названия")
@@ -312,36 +361,54 @@ def run_monitor_job():
             .format(url, title, employer, salary, published, url)
         )
 
-    html_parts = [
-        '<!DOCTYPE html>',
-        '<html lang="ru">',
-        '<head>',
-        '<meta charset="UTF-8">',
-        '<title>Вакансии ИТ-руководителей — {}</title>'.format(date_str),
-        '<style>',
-        'body{font-family:Arial,sans-serif;max-width:800px;margin:40px auto;padding:0 20px;color:#333}',
-        'h1{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}',
-        '.vacancy{background:#f8f9fa;border-left:4px solid #3498db;padding:15px;margin:15px 0;border-radius:4px}',
-        '.vacancy h3{margin:0 0 8px 0}',
-        '.vacancy h3 a{color:#2980b9;text-decoration:none}',
-        '.vacancy h3 a:hover{text-decoration:underline}',
-        '.vacancy p{margin:4px 0;color:#555}',
-        '.meta{color:#7f8c8d;font-size:0.9em;margin-top:20px}',
-        '</style>',
-        '</head>',
-        '<body>',
-        '<h1>📋 Новые вакансии ИТ-руководителей в Москве</h1>',
-        '<p>Период: <strong>{} дн.</strong> (с {} по {}) | Найдено: <strong>{}</strong></p>'.format(search_period, cutoff_date, date_str, len(new_vacancies)),
-        "\n".join(items_html),
-        '<p class="meta">Сформировано автоматически через API hh.ru</p>',
-        '</body>',
-        '</html>',
-    ]
-    html = "\n".join(html_parts)
+    html = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Вакансии ИТ-руководителей — {}</title>
+    <style>
+        body{{font-family:Arial,sans-serif;max-width:800px;margin:40px auto;padding:0 20px;color:#333}}
+        h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
+        .back{{margin-bottom:20px}}
+        .back a{{color:#2980b9;text-decoration:none;font-size:1rem}}
+        .back a:hover{{text-decoration:underline}}
+        .vacancy{{background:#f8f9fa;border-left:4px solid #3498db;padding:15px;margin:15px 0;border-radius:4px}}
+        .vacancy h3{{margin:0 0 8px 0}}
+        .vacancy h3 a{{color:#2980b9;text-decoration:none}}
+        .vacancy h3 a:hover{{text-decoration:underline}}
+        .vacancy p{{margin:4px 0;color:#555}}
+        .meta{{color:#7f8c8d;font-size:0.9em;margin-top:20px}}
+    </style>
+</head>
+<body>
+    <div class="back"><a href="/dashboard">← Назад к отчётам</a></div>
+    <h1>📋 Новые вакансии ИТ-руководителей в Москве</h1>
+    <p>Период: <strong>{} дн.</strong> (с {} по {}) | Найдено: <strong>{}</strong></p>
+    {}
+    <p class="meta">Сформировано автоматически через API hh.ru</p>
+</body>
+</html>""".format(date_str, search_period, cutoff_date, date_str, len(new_vacancies), "\n".join(items_html))
 
     html_path = OUTPUT_DIR / "vacancies_{}.html".format(date_str)
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html)
+
+    # Save report to config history (so it survives container restarts)
+    report_meta = {
+        "date": date_str,
+        "period": search_period,
+        "count": len(new_vacancies),
+        "filename_html": "vacancies_{}.html".format(date_str),
+        "filename_txt": "vacancies_{}.txt".format(date_str),
+        "html_content": html,
+        "txt_content": text_report,
+    }
+    history = cfg.get("reports_history", [])
+    history.append(report_meta)
+    # Keep only last 30 reports
+    if len(history) > 30:
+        history = history[-30:]
+    cfg["reports_history"] = history
 
     # Send Telegram (read from env)
     token_tg = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()

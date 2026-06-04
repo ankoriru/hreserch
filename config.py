@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     "only_workdays": True,
     "sent_vacancies": [],
     "hh_access_token": "",
+    "reports_history": [],
 }
 
 def load_config():
@@ -33,17 +34,16 @@ def load_config():
                 for key, val in DEFAULT_CONFIG.items():
                     if key not in data:
                         data[key] = val
-                print("[Config] Loaded from {}".format(CONFIG_FILE.absolute()))
                 return data
         except Exception as e:
-            print("[Config] Error loading: {}".format(e))
-    print("[Config] Using defaults (file not found or error)")
+            print("[Config] Ошибка загрузки: {}".format(e))
+    print("[Config] Используем значения по умолчанию (файл не найден)")
     return DEFAULT_CONFIG.copy()
 
 def save_config(cfg):
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
-        print("[Config] Saved to {} — queries: {}".format(CONFIG_FILE.absolute(), cfg.get("search_queries", [])))
+        print("[Config] Сохранено в {}".format(CONFIG_FILE.absolute()))
     except Exception as e:
-        print("[Config] Error saving: {}".format(e))
+        print("[Config] Ошибка сохранения: {}".format(e))
