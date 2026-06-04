@@ -567,4 +567,4 @@ def update_schedule(new_time):
             scheduler.add_job(run_monitor_job, 'cron', hour=h, minute=m, id='vacancy_job')
             print("[Scheduler] Добавлена задача на {}:{}".format(h, m))
     except Exception as e:
-        print("[Scheduler] Ошибка переназн
+        print("[Scheduler] Ошибка переназначения: {}".format(e))
