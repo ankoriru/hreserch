@@ -284,7 +284,7 @@ def send_telegram(token, chat_id, message):
 
 def cleanup_old_reports(days=7):
     """Remove report files older than N days."""
-    cutoff = datetime.now(TZ) - timedelta(days=days)
+    cutoff = datetime.now(TZ).replace(tzinfo=None) - timedelta(days=days)
     count = 0
     for f in OUTPUT_DIR.glob("vacancies_*"):
         try:
