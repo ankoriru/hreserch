@@ -49,24 +49,24 @@ def logout():
     session.clear()
     return redirect(url_for("login"))
 
-@app.route("/dashboard")
-@login_required
-def dashboard():
-    cfg = load_config()
+def _get_reports_list(cfg=None):
+    """Get deduplicated reports list from both files and history."""
+    if cfg is None:
+        cfg = load_config()
     reports_dir = Path("reports")
-
-    # Get all HTML files, filter last 7 days
     cutoff = datetime.now() - timedelta(days=7)
-    file_reports = []
+
+    # Use dict for deduplication by filename
+    reports_by_file = {}
+
+    # 1. Reports from disk files
     for f in reports_dir.glob("*.html"):
         try:
-            # Parse date from filename: vacancies_2026-06-04_11-00.html
             parts = f.stem.split('_')
             if len(parts) >= 3:
-                date_str = parts[1]  # 2026-06-04
+                date_str = parts[1]
                 file_dt = datetime.strptime(date_str, "%Y-%m-%d")
                 if file_dt >= cutoff:
-                    # Read meta
                     count = None
                     period = None
                     meta_path = f.with_suffix(".meta.json")
@@ -78,43 +78,51 @@ def dashboard():
                                 period = meta.get("period")
                         except:
                             pass
-                    file_reports.append({
+                    reports_by_file[f.name] = {
                         "date": date_str,
                         "time": parts[2] if len(parts) > 2 else "",
                         "filename": f.name,
                         "count": count,
                         "period": period,
                         "source": "file"
-                    })
+                    }
         except Exception as e:
-            print("[Dashboard] Ошибка парсинга файла {}: {}".format(f, e))
+            print("[Reports] Ошибка парсинга файла {}: {}".format(f, e))
 
-    # Sort by date+time descending
-    file_reports.sort(key=lambda x: "{}_{}".format(x["date"], x["time"]), reverse=True)
-
-    # Add history reports not on disk (last 7 days only)
-    seen = {r["filename"] for r in file_reports}
-    for h in cfg.get("reports_history", [])[::-1]:
-        if h.get("filename_html") not in seen:
+    # 2. Reports from history (only those NOT already on disk)
+    for h in cfg.get("reports_history", []):
+        fname = h.get("filename_html", "")
+        if fname and fname not in reports_by_file:
             try:
                 h_date = datetime.strptime(h.get("date", ""), "%Y-%m-%d")
                 if h_date >= cutoff:
-                    file_reports.append({
+                    reports_by_file[fname] = {
                         "date": h.get("date"),
                         "time": h.get("time", ""),
-                        "filename": h.get("filename_html"),
+                        "filename": fname,
                         "count": h.get("count"),
                         "period": h.get("period"),
                         "source": "history"
-                    })
+                    }
             except:
                 pass
+
+    # Sort by date+time descending
+    reports = list(reports_by_file.values())
+    reports.sort(key=lambda x: "{}_{}".format(x["date"], x["time"]), reverse=True)
+    return reports
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    cfg = load_config()
+    reports = _get_reports_list(cfg)
 
     telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
     period_labels = {1: "Сутки", 3: "3 дня", 7: "Неделя", 30: "Месяц"}
     period_label = period_labels.get(int(cfg.get("search_period", 1)), "Сутки")
 
-    return render_template("dashboard.html", cfg=cfg, reports=file_reports, telegram_ok=telegram_ok, period_label=period_label)
+    return render_template("dashboard.html", cfg=cfg, reports=reports, telegram_ok=telegram_ok, period_label=period_label)
 
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
@@ -156,7 +164,7 @@ def run_now():
             print("[Run-Now] Ошибка в фоне: {}".format(e))
 
     threading.Thread(target=_job, daemon=True).start()
-    flash("Проверка запущена в фоновом режиме. Результат появится через 1–2 минуты.", "info")
+    flash("Проверка запущена в фоновом режиме. Результат появится через 1\u20132 минуты.", "info")
     return redirect(url_for("dashboard"))
 
 @app.route("/reports/<filename>")
@@ -169,11 +177,11 @@ def view_report(filename):
     cfg = load_config()
     for h in cfg.get("reports_history", []):
         if h.get("filename_html") == filename:
-            return h.get("html_content", "<html><body>Отчёт не найден</body></html>")
+            return h.get("html_content", "<html><body>Отч\u0451т не найден</body></html>")
     for h in cfg.get("reports_history", []):
         if h.get("filename_txt") == filename:
-            return h.get("txt_content", "Отчёт не найден"), 200, {"Content-Type": "text/plain; charset=utf-8"}
-    return "Отчёт не найден", 404
+            return h.get("txt_content", "Отч\u0451т не найден"), 200, {"Content-Type": "text/plain; charset=utf-8"}
+    return "Отч\u0451т не найден", 404
 
 @app.route("/api/status")
 @login_required
@@ -192,36 +200,16 @@ def api_status():
 @app.route("/api/reports")
 @login_required
 def api_reports():
-    cfg = load_config()
-    reports_dir = Path("reports")
-    cutoff = datetime.now() - timedelta(days=7)
+    reports = _get_reports_list()
+    # Return simplified format for JS
     result = []
-    for f in reports_dir.glob("*.html"):
-        try:
-            parts = f.stem.split('_')
-            if len(parts) >= 3:
-                date_str = parts[1]
-                file_dt = datetime.strptime(date_str, "%Y-%m-%d")
-                if file_dt >= cutoff:
-                    count = None
-                    meta_path = f.with_suffix(".meta.json")
-                    if meta_path.exists():
-                        try:
-                            with open(meta_path, "r", encoding="utf-8") as fp:
-                                meta = json.load(fp)
-                                count = meta.get("count")
-                        except:
-                            pass
-                    result.append({"date": date_str, "filename": f.name, "count": count, "source": "file"})
-        except:
-            pass
-    for h in cfg.get("reports_history", [])[::-1]:
-        try:
-            h_date = datetime.strptime(h.get("date", ""), "%Y-%m-%d")
-            if h_date >= cutoff:
-                result.append({"date": h.get("date"), "filename": h.get("filename_html"), "count": h.get("count"), "source": "history"})
-        except:
-            pass
+    for r in reports:
+        result.append({
+            "date": r["date"],
+            "filename": r["filename"],
+            "count": r["count"],
+            "period": r["period"],
+        })
     return jsonify(result)
 
 @app.route("/api/run", methods=["POST"])

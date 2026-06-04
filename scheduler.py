@@ -55,6 +55,9 @@ def parse_date_text(date_text):
         return (today - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S+0300")
     elif "недел" in date_text:
         return (today - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S+0300")
+    elif "час" in date_text or "минут" in date_text or "мес" in date_text:
+        # Hours/minutes/months → treat as today for cutoff purposes
+        return today.strftime("%Y-%m-%dT%H:%M:%S+0300")
     else:
         nums = re.findall(r'\d+', date_text)
         if nums:

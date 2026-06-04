@@ -7,7 +7,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p reports
+# Create directories for reports and persistent config
+RUN mkdir -p reports /data
+
+# /data is the Amvera persistent volume
+VOLUME ["/data"]
 
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
