@@ -2,7 +2,7 @@ import os
 import re
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_from_directory
@@ -54,45 +54,68 @@ def logout():
 def dashboard():
     cfg = load_config()
     reports_dir = Path("reports")
-    file_reports = sorted(reports_dir.glob("*.html"), reverse=True)
 
-    report_list = []
-    for r in file_reports:
-        date_part = r.stem.replace("vacancies_", "")
-        count = None
-        # Try to read meta.json
-        meta_path = r.with_suffix(".meta.json")
-        if meta_path.exists():
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                    count = meta.get("count")
-            except:
-                pass
-        report_list.append({
-            "date": date_part,
-            "filename": r.name,
-            "count": count,
-            "source": "file"
-        })
+    # Get all HTML files, filter last 7 days
+    cutoff = datetime.now() - timedelta(days=7)
+    file_reports = []
+    for f in reports_dir.glob("*.html"):
+        try:
+            # Parse date from filename: vacancies_2026-06-04_11-00.html
+            parts = f.stem.split('_')
+            if len(parts) >= 3:
+                date_str = parts[1]  # 2026-06-04
+                file_dt = datetime.strptime(date_str, "%Y-%m-%d")
+                if file_dt >= cutoff:
+                    # Read meta
+                    count = None
+                    period = None
+                    meta_path = f.with_suffix(".meta.json")
+                    if meta_path.exists():
+                        try:
+                            with open(meta_path, "r", encoding="utf-8") as fp:
+                                meta = json.load(fp)
+                                count = meta.get("count")
+                                period = meta.get("period")
+                        except:
+                            pass
+                    file_reports.append({
+                        "date": date_str,
+                        "time": parts[2] if len(parts) > 2 else "",
+                        "filename": f.name,
+                        "count": count,
+                        "period": period,
+                        "source": "file"
+                    })
+        except Exception as e:
+            print("[Dashboard] Ошибка парсинга файла {}: {}".format(f, e))
 
-    # Add history reports not on disk
-    seen = {r.name for r in file_reports}
+    # Sort by date+time descending
+    file_reports.sort(key=lambda x: "{}_{}".format(x["date"], x["time"]), reverse=True)
+
+    # Add history reports not on disk (last 7 days only)
+    seen = {r["filename"] for r in file_reports}
     for h in cfg.get("reports_history", [])[::-1]:
         if h.get("filename_html") not in seen:
-            report_list.append({
-                "date": h.get("date"),
-                "filename": h.get("filename_html"),
-                "count": h.get("count"),
-                "source": "history"
-            })
+            try:
+                h_date = datetime.strptime(h.get("date", ""), "%Y-%m-%d")
+                if h_date >= cutoff:
+                    file_reports.append({
+                        "date": h.get("date"),
+                        "time": h.get("time", ""),
+                        "filename": h.get("filename_html"),
+                        "count": h.get("count"),
+                        "period": h.get("period"),
+                        "source": "history"
+                    })
+            except:
+                pass
 
     telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
     hh_token_ok = bool(cfg.get("hh_access_token", "").strip())
     period_labels = {1: "Сутки", 3: "3 дня", 7: "Неделя", 30: "Месяц"}
     period_label = period_labels.get(int(cfg.get("search_period", 1)), "Сутки")
 
-    return render_template("dashboard.html", cfg=cfg, reports=report_list, telegram_ok=telegram_ok, hh_token_ok=hh_token_ok, period_label=period_label)
+    return render_template("dashboard.html", cfg=cfg, reports=file_reports, telegram_ok=telegram_ok, hh_token_ok=hh_token_ok, period_label=period_label)
 
 @app.route("/settings", methods=["GET", "POST"])
 @login_required
@@ -128,7 +151,6 @@ def settings():
 @app.route("/run-now", methods=["POST"])
 @login_required
 def run_now():
-    # Run in background thread to avoid gunicorn worker timeout
     def _job():
         try:
             run_monitor_job()
@@ -176,21 +198,34 @@ def api_status():
 def api_reports():
     cfg = load_config()
     reports_dir = Path("reports")
-    file_reports = sorted(reports_dir.glob("*.html"), reverse=True)
+    cutoff = datetime.now() - timedelta(days=7)
     result = []
-    for r in file_reports:
-        count = None
-        meta_path = r.with_suffix(".meta.json")
-        if meta_path.exists():
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                    count = meta.get("count")
-            except:
-                pass
-        result.append({"date": r.stem.replace("vacancies_", ""), "filename": r.name, "count": count, "source": "file"})
+    for f in reports_dir.glob("*.html"):
+        try:
+            parts = f.stem.split('_')
+            if len(parts) >= 3:
+                date_str = parts[1]
+                file_dt = datetime.strptime(date_str, "%Y-%m-%d")
+                if file_dt >= cutoff:
+                    count = None
+                    meta_path = f.with_suffix(".meta.json")
+                    if meta_path.exists():
+                        try:
+                            with open(meta_path, "r", encoding="utf-8") as fp:
+                                meta = json.load(fp)
+                                count = meta.get("count")
+                        except:
+                            pass
+                    result.append({"date": date_str, "filename": f.name, "count": count, "source": "file"})
+        except:
+            pass
     for h in cfg.get("reports_history", [])[::-1]:
-        result.append({"date": h.get("date"), "filename": h.get("filename_html"), "count": h.get("count"), "source": "history"})
+        try:
+            h_date = datetime.strptime(h.get("date", ""), "%Y-%m-%d")
+            if h_date >= cutoff:
+                result.append({"date": h.get("date"), "filename": h.get("filename_html"), "count": h.get("count"), "source": "history"})
+        except:
+            pass
     return jsonify(result)
 
 @app.route("/api/run", methods=["POST"])

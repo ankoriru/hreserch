@@ -72,64 +72,68 @@ def parse_date_text(date_text):
     return today.strftime("%Y-%m-%dT%H:%M:%S+0300")
 
 def parse_salary_text(text):
-    """Parse salary text robustly."""
+    """Parse salary text robustly using specific regex patterns."""
     if not text:
         return None
-    # Extract numbers with various space separators
-    nums = re.findall(r'[\d\s\xa0\u202f]+', text)
-    nums_clean = []
-    for n in nums:
-        clean = n.replace(' ', '').replace('\xa0', '').replace('\u202f', '')
-        if clean.isdigit():
-            nums_clean.append(int(clean))
-    if not nums_clean:
-        return None
-    # Currency
+    text = text.replace('\xa0', ' ').replace('\u202f', ' ').replace('\u2011', ' ')
+
+    # Currency detection
     currency = "RUR"
     if 'USD' in text or '$' in text:
         currency = "USD"
     elif 'EUR' in text or '€' in text:
         currency = "EUR"
-    # Determine from/to
-    text_lower = text.lower()
-    has_ot = 'от' in text_lower
-    has_do = 'до' in text_lower
-    if has_ot and has_do and len(nums_clean) >= 2:
-        return {"from": nums_clean[0], "to": nums_clean[1], "currency": currency}
-    elif has_ot:
-        return {"from": nums_clean[0], "currency": currency}
-    elif has_do:
-        return {"to": nums_clean[0], "currency": currency}
-    elif len(nums_clean) >= 2:
-        return {"from": nums_clean[0], "to": nums_clean[1], "currency": currency}
-    else:
-        return {"from": nums_clean[0], "currency": currency}
+
+    # Pattern 1: "от 150 000 до 300 000 ₽"
+    match = re.search(r'от\s+(\d[\d\s]*)\s+до\s+(\d[\d\s]*)', text, re.IGNORECASE)
+    if match:
+        from_val = int(match.group(1).replace(' ', ''))
+        to_val = int(match.group(2).replace(' ', ''))
+        return {"from": from_val, "to": to_val, "currency": currency}
+
+    # Pattern 2: "до 200 000 ₽" (but NOT "до вычета налогов" — must have number immediately after)
+    match = re.search(r'до\s+(\d[\d\s]*)', text, re.IGNORECASE)
+    if match:
+        val = int(match.group(1).replace(' ', ''))
+        return {"to": val, "currency": currency}
+
+    # Pattern 3: "от 150 000 ₽"
+    match = re.search(r'от\s+(\d[\d\s]*)', text, re.IGNORECASE)
+    if match:
+        val = int(match.group(1).replace(' ', ''))
+        return {"from": val, "currency": currency}
+
+    # Fallback: extract all numbers, but only if currency symbol present
+    if any(c in text for c in ['₽', 'руб', 'USD', 'EUR', '$', '€']):
+        nums = re.findall(r'\d[\d\s]*', text)
+        nums_clean = [int(n.replace(' ', '')) for n in nums if n.strip().replace(' ', '').isdigit()]
+        if nums_clean:
+            if len(nums_clean) >= 2:
+                return {"from": nums_clean[0], "to": nums_clean[1], "currency": currency}
+            else:
+                return {"from": nums_clean[0], "currency": currency}
+
+    return None
 
 def find_salary_in_card(card):
-    """Aggressively find salary text in a vacancy card."""
-    # Try specific data-qa first
+    """Find salary in vacancy card — only in specific tags, NOT whole card."""
+    # Primary: data-qa attribute
     sal_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-compensation"})
     if sal_tag:
         txt = sal_tag.get_text(strip=True)
         if txt:
-            return parse_salary_text(txt)
-
-    # Try common classes
-    for cls in ["compensation", "salary", "bloko-header-section-3", "bloko-text", "vacancy-serp-item__sidebar"]:
-        for tag in card.find_all(class_=re.compile(r"{}".format(cls))):
-            txt = tag.get_text(strip=True)
-            if txt and any(c in txt for c in ['₽', 'руб', 'USD', 'EUR', '$', '€', 'от', 'до']):
-                sal = parse_salary_text(txt)
-                if sal:
-                    return sal
-
-    # Fallback: any span/div with numbers and currency symbols
-    for tag in card.find_all(["span", "div"]):
-        txt = tag.get_text(strip=True)
-        if len(txt) < 200 and any(c in txt for c in ['₽', 'руб', 'USD', 'EUR', '$', '€']):
             sal = parse_salary_text(txt)
             if sal:
                 return sal
+
+    # Secondary: specific compensation classes
+    for cls in ["compensation", "vacancy-serp-item__sidebar", "bloko-header-section-3"]:
+        for tag in card.find_all(class_=re.compile(r"{}".format(cls))):
+            txt = tag.get_text(strip=True)
+            if txt and len(txt) < 100:
+                sal = parse_salary_text(txt)
+                if sal:
+                    return sal
 
     return None
 
@@ -278,6 +282,26 @@ def send_telegram(token, chat_id, message):
         print("[Telegram Error] {}".format(e))
         return False
 
+def cleanup_old_reports(days=7):
+    """Remove report files older than N days."""
+    cutoff = datetime.now(TZ) - timedelta(days=days)
+    count = 0
+    for f in OUTPUT_DIR.glob("vacancies_*"):
+        try:
+            # Extract date from filename: vacancies_2026-06-04_11-00.html
+            stem = f.stem  # vacancies_2026-06-04_11-00
+            parts = stem.split('_')
+            if len(parts) >= 3:
+                date_str = parts[1]  # 2026-06-04
+                file_dt = datetime.strptime(date_str, "%Y-%m-%d")
+                if file_dt < cutoff:
+                    f.unlink()
+                    count += 1
+        except Exception as e:
+            print("[Cleanup] Ошибка удаления {}: {}".format(f, e))
+    if count > 0:
+        print("[Cleanup] Удалено {} старых отчётов".format(count))
+
 def run_monitor_job():
     print("[Scheduler] === Задача запущена в {} ===".format(datetime.now(TZ).strftime("%H:%M:%S")))
     cfg = load_config()
@@ -290,6 +314,7 @@ def run_monitor_job():
 
     today = datetime.now(TZ)
     date_str = today.strftime("%Y-%m-%d")
+    time_str = today.strftime("%H-%M")
     search_period = int(cfg.get("search_period", 1))
     cutoff_date = (today - timedelta(days=search_period - 1)).strftime("%Y-%m-%d")
     print("[Scheduler] Период: {} дн., отсечка: {}".format(search_period, cutoff_date))
@@ -342,7 +367,8 @@ def run_monitor_job():
         lines.append("")
 
     text_report = "\n".join(lines)
-    txt_path = OUTPUT_DIR / "vacancies_{}.txt".format(date_str)
+    txt_filename = "vacancies_{}_{}.txt".format(date_str, time_str)
+    txt_path = OUTPUT_DIR / txt_filename
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(text_report)
 
@@ -389,33 +415,37 @@ def run_monitor_job():
     <h1>📋 Новые вакансии ИТ-руководителей в Москве</h1>
     <p>Период: <strong>{} дн.</strong> (с {} по {}) | Найдено: <strong>{}</strong></p>
     {}
-    <p class="meta">Сформировано автоматически через API hh.ru</p>
+    <p class="meta">Сформировано автоматически {} в {}</p>
 </body>
-</html>""".format(date_str, search_period, cutoff_date, date_str, len(new_vacancies), "\n".join(items_html))
+</html>""".format(date_str, search_period, cutoff_date, date_str, len(new_vacancies), "\n".join(items_html), date_str, today.strftime("%H:%M"))
 
-    html_path = OUTPUT_DIR / "vacancies_{}.html".format(date_str)
+    html_filename = "vacancies_{}_{}.html".format(date_str, time_str)
+    html_path = OUTPUT_DIR / html_filename
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html)
 
-    # Save meta.json for dashboard
+    # Save meta.json
     meta = {
         "date": date_str,
+        "time": time_str,
         "period": search_period,
         "cutoff": cutoff_date,
         "count": len(new_vacancies),
         "queries": cfg.get("search_queries", []),
     }
-    meta_path = OUTPUT_DIR / "vacancies_{}.meta.json".format(date_str)
+    meta_filename = "vacancies_{}_{}.meta.json".format(date_str, time_str)
+    meta_path = OUTPUT_DIR / meta_filename
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
     # Save to config history (survives container restarts)
     report_meta = {
         "date": date_str,
+        "time": time_str,
         "period": search_period,
         "count": len(new_vacancies),
-        "filename_html": "vacancies_{}.html".format(date_str),
-        "filename_txt": "vacancies_{}.txt".format(date_str),
+        "filename_html": html_filename,
+        "filename_txt": txt_filename,
         "html_content": html,
         "txt_content": text_report,
     }
@@ -424,6 +454,9 @@ def run_monitor_job():
     if len(history) > 30:
         history = history[-30:]
     cfg["reports_history"] = history
+
+    # Cleanup old reports (keep 7 days)
+    cleanup_old_reports(days=7)
 
     # Send Telegram (read from env)
     token_tg = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
