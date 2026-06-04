@@ -2,7 +2,11 @@ import json
 import os
 from pathlib import Path
 
-CONFIG_FILE = Path("config.json")
+# Amvera provides persistent storage at /data, use it if available
+if Path("/data").exists():
+    CONFIG_FILE = Path("/data/config.json")
+else:
+    CONFIG_FILE = Path("config.json")
 
 DEFAULT_CONFIG = {
     "search_queries": [
