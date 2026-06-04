@@ -3,13 +3,18 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h2>📋 Панель управления</h2>
-    <form method="POST" action="{{ url_for('run_now') }}" onsubmit="return confirm('Запустить проверку вакансий прямо сейчас?')">
-        <button type="submit" class="btn btn-success">▶ Запустить сейчас</button>
-    </form>
+    <div>
+        <span id="run-status" class="me-3 text-muted" style="display:none">
+            <span class="spinner-border spinner-border-sm" role="status"></span> Выполняется проверка...
+        </span>
+        <button id="run-now-btn" type="button" class="btn btn-success" onclick="runNow()">
+            ▶ Запустить сейчас
+        </button>
+    </div>
 </div>
 
 <div class="row mb-4">
-    <div class="col-md-3">
+    <div class="col-md-4">
         <div class="card text-white bg-primary">
             <div class="card-body">
                 <h5 class="card-title">Статус</h5>
@@ -17,7 +22,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-md-4">
         <div class="card text-white bg-info">
             <div class="card-body">
                 <h5 class="card-title">Время / Период</h5>
@@ -25,15 +30,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-3">
-        <div class="card text-white bg-secondary">
-            <div class="card-body">
-                <h5 class="card-title">HH Token</h5>
-                <p class="card-text fs-4">{{ "✅" if hh_token_ok else "❌" }}</p>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-3">
+    <div class="col-md-4">
         <div class="card text-white bg-dark">
             <div class="card-body">
                 <h5 class="card-title">Telegram</h5>
@@ -54,7 +51,7 @@
                 <th>Вакансий</th>
             </tr>
         </thead>
-        <tbody>
+        <tbody id="reports-tbody">
             {% for r in reports %}
             <tr onclick="window.open('{{ url_for('view_report', filename=r.filename) }}', '_blank')" style="cursor:pointer">
                 <td>{{ r.date }}{% if r.time %} {{ r.time[:2] }}:{{ r.time[3:] }}{% endif %}</td>
@@ -66,6 +63,6 @@
     </table>
 </div>
 {% else %}
-<div class="alert alert-info">Пока нет отчётов. Нажмите «Запустить сейчас» или дождитесь запланированного времени.</div>
+<div id="reports-empty" class="alert alert-info">Пока нет отчётов. Нажмите «Запустить сейчас» или дождитесь запланированного времени.</div>
 {% endif %}
 {% endblock %}
