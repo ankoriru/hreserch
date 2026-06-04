@@ -1,5 +1,7 @@
 import os
 import re
+import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from functools import wraps
@@ -51,27 +53,33 @@ def logout():
 @login_required
 def dashboard():
     cfg = load_config()
-
-    # Combine file reports and history reports
     reports_dir = Path("reports")
     file_reports = sorted(reports_dir.glob("*.html"), reverse=True)
 
-    # Build report list from files + history
     report_list = []
-    seen_files = set()
-
     for r in file_reports:
         date_part = r.stem.replace("vacancies_", "")
-        seen_files.add(r.name)
+        count = None
+        # Try to read meta.json
+        meta_path = r.with_suffix(".meta.json")
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                    count = meta.get("count")
+            except:
+                pass
         report_list.append({
             "date": date_part,
             "filename": r.name,
+            "count": count,
             "source": "file"
         })
 
-    # Add history reports that don't exist as files
+    # Add history reports not on disk
+    seen = {r.name for r in file_reports}
     for h in cfg.get("reports_history", [])[::-1]:
-        if h.get("filename_html") not in seen_files:
+        if h.get("filename_html") not in seen:
             report_list.append({
                 "date": h.get("date"),
                 "filename": h.get("filename_html"),
@@ -104,50 +112,47 @@ def settings():
         cfg["enabled"] = request.form.get("enabled") == "on"
         cfg["only_workdays"] = request.form.get("only_workdays") == "on"
 
-        # CRITICAL FIX: properly parse textarea lines
         queries_raw = request.form.get("search_queries", "")
-        # Split by newlines, strip each, filter empty
         cfg["search_queries"] = [q.strip() for q in queries_raw.replace('\r\n', '\n').split('\n') if q.strip()]
 
         save_config(cfg)
         update_schedule(cfg["schedule_time"])
-        flash("Настройки сохранены. Запросы: {}".format(len(cfg["search_queries"])), "success")
+        flash("Настройки сохранены. Запросов: {} | Время: {} | Период: {} дн.".format(
+            len(cfg["search_queries"]), cfg["schedule_time"], cfg["search_period"]), "success")
         return redirect(url_for("settings"))
 
     telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
-    # Prepare search_queries as newline-separated string for textarea
     search_queries_text = "\n".join(cfg.get("search_queries", []))
     return render_template("settings.html", cfg=cfg, telegram_ok=telegram_ok, search_queries_text=search_queries_text)
 
 @app.route("/run-now", methods=["POST"])
 @login_required
 def run_now():
-    try:
-        run_monitor_job()
-        flash("Проверка выполнена успешно", "success")
-    except Exception as e:
-        flash("Ошибка при выполнении: {}".format(e), "danger")
+    # Run in background thread to avoid gunicorn worker timeout
+    def _job():
+        try:
+            run_monitor_job()
+        except Exception as e:
+            print("[Run-Now] Ошибка в фоне: {}".format(e))
+
+    threading.Thread(target=_job, daemon=True).start()
+    flash("Проверка запущена в фоновом режиме. Результат появится через 1–2 минуты.", "info")
     return redirect(url_for("dashboard"))
 
 @app.route("/reports/<filename>")
 @login_required
 def view_report(filename):
-    # Check if file exists on disk
     file_path = Path("reports") / filename
     if file_path.exists():
         return send_from_directory("reports", filename)
 
-    # Check if in history (for HTML reports)
     cfg = load_config()
     for h in cfg.get("reports_history", []):
         if h.get("filename_html") == filename:
             return h.get("html_content", "<html><body>Отчёт не найден</body></html>")
-
-    # Check TXT in history
     for h in cfg.get("reports_history", []):
         if h.get("filename_txt") == filename:
             return h.get("txt_content", "Отчёт не найден"), 200, {"Content-Type": "text/plain; charset=utf-8"}
-
     return "Отчёт не найден", 404
 
 @app.route("/api/status")
@@ -174,22 +179,26 @@ def api_reports():
     file_reports = sorted(reports_dir.glob("*.html"), reverse=True)
     result = []
     for r in file_reports:
-        result.append({"date": r.stem.replace("vacancies_", ""), "filename": r.name, "source": "file"})
+        count = None
+        meta_path = r.with_suffix(".meta.json")
+        if meta_path.exists():
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                    count = meta.get("count")
+            except:
+                pass
+        result.append({"date": r.stem.replace("vacancies_", ""), "filename": r.name, "count": count, "source": "file"})
     for h in cfg.get("reports_history", [])[::-1]:
-        result.append({
-            "date": h.get("date"),
-            "filename": h.get("filename_html"),
-            "count": h.get("count"),
-            "source": "history"
-        })
+        result.append({"date": h.get("date"), "filename": h.get("filename_html"), "count": h.get("count"), "source": "history"})
     return jsonify(result)
 
 @app.route("/api/run", methods=["POST"])
 @login_required
 def api_run():
     try:
-        run_monitor_job()
-        return jsonify({"status": "ok"})
+        threading.Thread(target=run_monitor_job, daemon=True).start()
+        return jsonify({"status": "ok", "message": "Задача запущена в фоне"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 

@@ -72,11 +72,11 @@ def parse_date_text(date_text):
     return today.strftime("%Y-%m-%dT%H:%M:%S+0300")
 
 def parse_salary_text(text):
-    """Parse salary text like 'до 200 000 ₽', 'от 150 000 до 300 000 руб.'"""
+    """Parse salary text robustly."""
     if not text:
         return None
-    # Extract all numbers
-    nums = re.findall(r'[\d\s\xa0]+', text)
+    # Extract numbers with various space separators
+    nums = re.findall(r'[\d\s\xa0\u202f]+', text)
     nums_clean = []
     for n in nums:
         clean = n.replace(' ', '').replace('\xa0', '').replace('\u202f', '')
@@ -84,7 +84,7 @@ def parse_salary_text(text):
             nums_clean.append(int(clean))
     if not nums_clean:
         return None
-    # Determine currency
+    # Currency
     currency = "RUR"
     if 'USD' in text or '$' in text:
         currency = "USD"
@@ -104,6 +104,34 @@ def parse_salary_text(text):
         return {"from": nums_clean[0], "to": nums_clean[1], "currency": currency}
     else:
         return {"from": nums_clean[0], "currency": currency}
+
+def find_salary_in_card(card):
+    """Aggressively find salary text in a vacancy card."""
+    # Try specific data-qa first
+    sal_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-compensation"})
+    if sal_tag:
+        txt = sal_tag.get_text(strip=True)
+        if txt:
+            return parse_salary_text(txt)
+
+    # Try common classes
+    for cls in ["compensation", "salary", "bloko-header-section-3", "bloko-text", "vacancy-serp-item__sidebar"]:
+        for tag in card.find_all(class_=re.compile(r"{}".format(cls))):
+            txt = tag.get_text(strip=True)
+            if txt and any(c in txt for c in ['₽', 'руб', 'USD', 'EUR', '$', '€', 'от', 'до']):
+                sal = parse_salary_text(txt)
+                if sal:
+                    return sal
+
+    # Fallback: any span/div with numbers and currency symbols
+    for tag in card.find_all(["span", "div"]):
+        txt = tag.get_text(strip=True)
+        if len(txt) < 200 and any(c in txt for c in ['₽', 'руб', 'USD', 'EUR', '$', '€']):
+            sal = parse_salary_text(txt)
+            if sal:
+                return sal
+
+    return None
 
 def matches_query(vacancy_name, query):
     if not vacancy_name or not query:
@@ -129,7 +157,7 @@ def fetch_vacancies_api(query, area_id, token, per_page=20):
             data = json.loads(resp.read().decode("utf-8"))
             items = data.get("items", [])
             filtered = [item for item in items if matches_query(item.get("name", ""), query)]
-            print("[API] Получено {}, после фильтра по названию: {}".format(len(items), len(filtered)))
+            print("[API] Получено {}, после фильтра: {}".format(len(items), len(filtered)))
             return filtered
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") if e.read() else ""
@@ -164,7 +192,7 @@ def fetch_vacancies_html(query, area_id):
             html = resp.read().decode("utf-8")
             items = parse_html_vacancies(html)
             filtered = [item for item in items if matches_query(item.get("name", ""), query)]
-            print("[HTML] Получено {}, после фильтра по названию: {}".format(len(items), len(filtered)))
+            print("[HTML] Получено {}, после фильтра: {}".format(len(items), len(filtered)))
             return filtered
     except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
         print("[HTML Connection Error] {}: {}".format(query, e))
@@ -197,36 +225,13 @@ def parse_html_vacancies(html):
             title = link_tag.get_text(strip=True) if link_tag else "Без названия"
             url = href if href.startswith("http") else "https://hh.ru{}".format(href)
 
-            # Employer
             emp_tag = card.find("a", attrs={"data-qa": "vacancy-serp__vacancy-employer"})
             if not emp_tag:
                 emp_tag = card.find("div", class_=re.compile(r"employer"))
             employer = emp_tag.get_text(strip=True) if emp_tag else "Неизвестный"
 
-            # Salary — robust parsing
-            salary = None
-            # Try data-qa first
-            sal_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-compensation"})
-            if sal_tag:
-                salary = parse_salary_text(sal_tag.get_text(strip=True))
-            # Try by class
-            if not salary:
-                for cls in ["compensation", "salary", "bloko-header-section-3", "bloko-text"]:
-                    sal_tag = card.find("span", class_=re.compile(r"{}".format(cls)))
-                    if sal_tag:
-                        salary = parse_salary_text(sal_tag.get_text(strip=True))
-                        if salary:
-                            break
-            # Fallback: search any text with currency symbol
-            if not salary:
-                for tag in card.find_all(string=re.compile(r'[\d\s\xa0\u202f]+[₽$€]|руб|USD|EUR|зарплата')):
-                    text = tag.strip()
-                    if text and len(text) < 150:
-                        salary = parse_salary_text(text)
-                        if salary:
-                            break
+            salary = find_salary_in_card(card)
 
-            # Published date
             date_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-date"})
             if not date_tag:
                 date_tag = card.find("span", class_=re.compile(r"date"))
@@ -238,7 +243,7 @@ def parse_html_vacancies(html):
                 "salary": salary, "published_at": published, "alternate_url": url,
             })
         except Exception as e:
-            print("[HTML Parser] Ошибка парсинга карточки: {}".format(e))
+            print("[HTML Parser] Ошибка карточки: {}".format(e))
             continue
     return vacancies
 
@@ -293,7 +298,7 @@ def run_monitor_job():
     if token:
         print("[Scheduler] Используем HH Access Token")
     else:
-        print("[Scheduler] HH токен не задан — используем HTML-парсинг")
+        print("[Scheduler] HH токен не задан — HTML-парсинг")
 
     sent_ids = set(cfg.get("sent_vacancies", []))
     all_vacancies = []
@@ -315,14 +320,13 @@ def run_monitor_job():
     if not new_vacancies:
         cfg["sent_vacancies"] = sorted(sent_ids | seen_ids)
         save_config(cfg)
-        print("[Scheduler] Нет новых вакансий. История обновлена.")
+        print("[Scheduler] Нет новых вакансий.")
         return
 
     # Build text report
     lines = []
     lines.append("📋 Новые вакансии ИТ-руководителей в Москве — {}".format(date_str))
-    lines.append("Период: {} дн. (с {} по {})".format(search_period, cutoff_date, date_str))
-    lines.append("Найдено: {}".format(len(new_vacancies)))
+    lines.append("Период: {} дн. (с {} по {}) | Найдено: {}".format(search_period, cutoff_date, date_str, len(new_vacancies)))
     lines.append("")
     for v in new_vacancies:
         title = v.get("name", "Без названия")
@@ -342,7 +346,7 @@ def run_monitor_job():
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(text_report)
 
-    # Build HTML report with "Back" button
+    # Build HTML report with Back button
     items_html = []
     for v in new_vacancies:
         title = v.get("name", "Без названия")
@@ -393,7 +397,19 @@ def run_monitor_job():
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html)
 
-    # Save report to config history (so it survives container restarts)
+    # Save meta.json for dashboard
+    meta = {
+        "date": date_str,
+        "period": search_period,
+        "cutoff": cutoff_date,
+        "count": len(new_vacancies),
+        "queries": cfg.get("search_queries", []),
+    }
+    meta_path = OUTPUT_DIR / "vacancies_{}.meta.json".format(date_str)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    # Save to config history (survives container restarts)
     report_meta = {
         "date": date_str,
         "period": search_period,
@@ -405,7 +421,6 @@ def run_monitor_job():
     }
     history = cfg.get("reports_history", [])
     history.append(report_meta)
-    # Keep only last 30 reports
     if len(history) > 30:
         history = history[-30:]
     cfg["reports_history"] = history
@@ -415,7 +430,7 @@ def run_monitor_job():
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if token_tg and chat_id:
         MAX_LEN = 4000
-        header = "📋 Новые вакансии ИТ-руководителей в Москве\nПериод: {} дн. (с {} по {})\nНайдено: {}\n\n".format(search_period, cutoff_date, date_str, len(new_vacancies))
+        header = "📋 Новые вакансии ИТ-руководителей в Москве\nПериод: {} дн. (с {} по {}) | Найдено: {}\n\n".format(search_period, cutoff_date, date_str, len(new_vacancies))
         messages = []
         current = header
         for v in new_vacancies:
