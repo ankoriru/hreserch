@@ -62,8 +62,8 @@
 
         <div class="mb-3">
             <label class="form-label">Поисковые запросы (по одному на строку)</label>
-            <textarea name="search_queries" class="form-control" rows="8" required>{{ cfg.search_queries|join("\n") }}</textarea>
-            <div class="form-text">Каждый запрос будет искаться отдельно через API hh.ru</div>
+            <textarea name="search_queries" class="form-control" rows="8" required>{{ search_queries_text }}</textarea>
+            <div class="form-text">Каждый запрос будет искаться отдельно. В названии вакансии должны присутствовать ВСЕ слова из запроса (в любом порядке).</div>
         </div>
 
         <div class="row mb-3">
