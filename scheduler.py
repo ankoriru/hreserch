@@ -195,7 +195,7 @@ def parse_html_vacancies(html):
                 continue
             vid = id_match.group(1)
             title = link_tag.get_text(strip=True, separator=' ') if link_tag else "Без названия"
-            url = href if href.startswith("http") else "https://hh.ru{}".format(href)
+            url = "https://hh.ru/vacancy/{}".format(vid)
 
             emp_tag = card.find("a", attrs={"data-qa": "vacancy-serp__vacancy-employer"})
             if not emp_tag:
