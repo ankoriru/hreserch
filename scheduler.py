@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import socket
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
@@ -100,6 +101,9 @@ def fetch_vacancies_api(query, area_id, token, per_page=20):
         body = e.read().decode("utf-8") if e.read() else ""
         print("[API Error] {}: {} — body: {}".format(query, e, body[:500]))
         return None
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+        print("[API Connection Error] {}: {}".format(query, e))
+        return None
     except Exception as e:
         print("[API Error] {}: {}".format(query, e))
         return None
@@ -128,6 +132,9 @@ def fetch_vacancies_html(query, area_id):
             filtered = [item for item in items if matches_query(item.get("name", ""), query)]
             print("[HTML] Получено {}, после фильтра по названию: {}".format(len(items), len(filtered)))
             return filtered
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+        print("[HTML Connection Error] {}: {}".format(query, e))
+        return []
     except Exception as e:
         print("[HTML Error] {}: {}".format(query, e))
         return []
@@ -210,6 +217,9 @@ def send_telegram(token, chat_id, message):
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.status == 200
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+        print("[Telegram Connection Error] {}".format(e))
+        return False
     except Exception as e:
         print("[Telegram Error] {}".format(e))
         return False
