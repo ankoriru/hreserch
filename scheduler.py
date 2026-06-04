@@ -1,7 +1,9 @@
+import html as html_module
 import json
 import os
 import re
 import socket
+import time
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
@@ -141,17 +143,23 @@ def matches_query(vacancy_name, query):
     if not vacancy_name or not query:
         return False
     name_lower = vacancy_name.lower()
-    words = [w.strip() for w in query.lower().split() if w.strip()]
+    query_lower = query.lower()
+    # Direct substring match (e.g. "cio" matches "Chief Information Officer (CIO)")
+    if query_lower in name_lower:
+        return True
+    # Word-by-word match: all words from query must be present
+    words = [w.strip() for w in query_lower.split() if w.strip()]
     if not words:
         return False
     return all(word in name_lower for word in words)
 
-def fetch_vacancies_api(query, area_id, token, per_page=20):
+def fetch_vacancies_api(query, area_id, token, per_page=20, search_period=1):
     url = "https://api.hh.ru/vacancies"
     params = {
         "text": query,
         "area": area_id,
         "per_page": per_page,
+        "search_period": search_period,
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
     print("[API URL] {}".format(full_url))
@@ -174,13 +182,13 @@ def fetch_vacancies_api(query, area_id, token, per_page=20):
         print("[API Error] {}: {}".format(query, e))
         return None
 
-def fetch_vacancies_html(query, area_id):
+def fetch_vacancies_html(query, area_id, search_period=1):
     url = "https://hh.ru/search/vacancy"
     params = {
         "text": query,
         "area": area_id,
         "order_by": "publication_time",
-        "search_period": 3,
+        "search_period": search_period,
         "items_on_page": 20,
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
@@ -226,20 +234,20 @@ def parse_html_vacancies(html):
             if not id_match:
                 continue
             vid = id_match.group(1)
-            title = link_tag.get_text(strip=True) if link_tag else "Без названия"
+            title = link_tag.get_text(strip=True, separator=' ') if link_tag else "Без названия"
             url = href if href.startswith("http") else "https://hh.ru{}".format(href)
 
             emp_tag = card.find("a", attrs={"data-qa": "vacancy-serp__vacancy-employer"})
             if not emp_tag:
                 emp_tag = card.find("div", class_=re.compile(r"employer"))
-            employer = emp_tag.get_text(strip=True) if emp_tag else "Неизвестный"
+            employer = emp_tag.get_text(strip=True, separator=' ') if emp_tag else "Неизвестный"
 
             salary = find_salary_in_card(card)
 
             date_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-date"})
             if not date_tag:
                 date_tag = card.find("span", class_=re.compile(r"date"))
-            date_text = date_tag.get_text(strip=True) if date_tag else None
+            date_text = date_tag.get_text(strip=True, separator=' ') if date_tag else None
             published = parse_date_text(date_text)
 
             vacancies.append({
@@ -251,15 +259,23 @@ def parse_html_vacancies(html):
             continue
     return vacancies
 
-def fetch_vacancies(query, area_id, token, per_page=20):
-    items = fetch_vacancies_api(query, area_id, token, per_page)
+def fetch_vacancies(query, area_id, token, per_page=20, search_period=1):
+    items = fetch_vacancies_api(query, area_id, token, per_page, search_period)
     if items is not None:
         return items
     print("[Fallback] API не сработал, пробуем HTML-парсинг...")
-    return fetch_vacancies_html(query, area_id)
+    return fetch_vacancies_html(query, area_id, search_period)
 
-def send_telegram(token, chat_id, message):
+def _escape_tg(text):
+    """Escape special HTML chars for Telegram HTML parse mode."""
+    if not text:
+        return ""
+    return html_module.escape(str(text))
+
+
+def send_telegram(token, chat_id, message, retries=3):
     if not token or not chat_id:
+        print("[Telegram] Пропуск: токен или chat_id не заданы")
         return False
     tg_url = "https://api.telegram.org/bot{}/sendMessage".format(token)
     payload = {
@@ -272,15 +288,32 @@ def send_telegram(token, chat_id, message):
     req = urllib.request.Request(tg_url, data=data,
                                   headers={"Content-Type": "application/json"},
                                   method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status == 200
-    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-        print("[Telegram Connection Error] {}".format(e))
-        return False
-    except Exception as e:
-        print("[Telegram Error] {}".format(e))
-        return False
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status == 200:
+                    return True
+                body = resp.read().decode("utf-8")[:500]
+                print("[Telegram HTTP {}] {}".format(resp.status, body))
+                return False
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8")[:500] if e.read else ""
+            print("[Telegram HTTPError] {} — {}".format(e.code, body))
+            last_err = e
+            # Don't retry on 4xx client errors
+            if 400 <= e.code < 500:
+                return False
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+            print("[Telegram Connection Error] попытка {}/{} — {}".format(attempt, retries, e))
+            last_err = e
+        except Exception as e:
+            print("[Telegram Error] попытка {}/{} — {}".format(attempt, retries, e))
+            last_err = e
+        if attempt < retries:
+            time.sleep(5)
+    print("[Telegram] Все {} попытки исчерпаны. Последняя ошибка: {}".format(retries, last_err))
+    return False
 
 def cleanup_old_reports(days=7):
     """Remove report files older than N days."""
@@ -330,7 +363,7 @@ def run_monitor_job():
     seen_ids = set()
 
     for query in cfg.get("search_queries", []):
-        items = fetch_vacancies(query, cfg["area_id"], token, per_page=20)
+        items = fetch_vacancies(query, cfg["area_id"], token, per_page=20, search_period=search_period)
         print('[Scheduler] Запрос "{}" -> {} вакансий'.format(query, len(items)))
         for item in items:
             vid = item.get("id")
@@ -461,25 +494,27 @@ def run_monitor_job():
     # Send Telegram (read from env)
     token_tg = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    print("[Scheduler] Telegram: token_{} | chat_{}".format(
+        "ok" if token_tg else "missing", "ok" if chat_id else "missing"))
     if token_tg and chat_id:
         MAX_LEN = 4000
         header = "📋 Новые вакансии ИТ-руководителей в Москве\nПериод: {} дн. (с {} по {}) | Найдено: {}\n\n".format(search_period, cutoff_date, date_str, len(new_vacancies))
         messages = []
         current = header
         for v in new_vacancies:
+            # Escape HTML-sensitive fields for Telegram parse_mode=HTML
+            v_name = _escape_tg(v.get("name", "Без названия"))
+            v_employer = _escape_tg(v.get("employer", {}).get("name", "Неизвестный"))
+            v_salary = _escape_tg(format_salary(v))
+            v_date = _escape_tg(format_datetime(v.get("published_at", "")))
+            v_url = _escape_tg(v.get("alternate_url", ""))
             block = (
                 "• {}\n"
                 "  Компания: {}\n"
                 "  Зарплата: {}\n"
                 "  Дата и время: {}\n"
                 "  Ссылка: {}\n\n"
-            ).format(
-                v.get("name", ""),
-                v.get("employer", {}).get("name", ""),
-                format_salary(v),
-                format_datetime(v.get("published_at", "")),
-                v.get("alternate_url", "")
-            )
+            ).format(v_name, v_employer, v_salary, v_date, v_url)
             if len(current) + len(block) > MAX_LEN:
                 messages.append(current)
                 current = block
@@ -487,6 +522,8 @@ def run_monitor_job():
                 current += block
         if current:
             messages.append(current)
+        print("[Scheduler] Telegram: {} сообщений, общий размер ~{}".format(
+            len(messages), sum(len(m) for m in messages)))
         for i, msg in enumerate(messages, 1):
             ok = send_telegram(token_tg, chat_id, msg)
             print("[Scheduler] Telegram часть {}/{}: {}".format(i, len(messages), "OK" if ok else "ОШИБКА"))
@@ -530,4 +567,4 @@ def update_schedule(new_time):
             scheduler.add_job(run_monitor_job, 'cron', hour=h, minute=m, id='vacancy_job')
             print("[Scheduler] Добавлена задача на {}:{}".format(h, m))
     except Exception as e:
-        print("[Scheduler] Ошибка переназначения: {}".format(e))
+        print("[Scheduler] Ошибка переназн
