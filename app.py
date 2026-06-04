@@ -212,6 +212,18 @@ def api_reports():
         })
     return jsonify(result)
 
+@app.route("/api/last_run")
+@login_required
+def api_last_run():
+    last_run_path = Path("reports") / "last_run.json"
+    if last_run_path.exists():
+        try:
+            with open(last_run_path, "r", encoding="utf-8") as f:
+                return jsonify(json.load(f))
+        except Exception:
+            pass
+    return jsonify({"start_ts": None, "finished_at": None, "new_count": 0, "has_new": False})
+
 @app.route("/api/run", methods=["POST"])
 @login_required
 def api_run():

@@ -294,14 +294,34 @@ def cleanup_old_reports(days=7):
     if count > 0:
         print("[Cleanup] Удалено {} старых отчётов".format(count))
 
+def _write_last_run(start_ts, new_count, has_new, queries):
+    """Write last_run.json so frontend knows the job finished."""
+    try:
+        last_run = {
+            "start_ts": start_ts,
+            "finished_at": datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S"),
+            "new_count": new_count,
+            "has_new": has_new,
+            "queries": queries,
+        }
+        path = OUTPUT_DIR / "last_run.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(last_run, f, ensure_ascii=False)
+    except Exception as e:
+        print("[Scheduler] Ошибка записи last_run: {}".format(e))
+
+
 def run_monitor_job():
+    start_ts = datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S")
     print("[Scheduler] === Задача запущена в {} ===".format(datetime.now(TZ).strftime("%H:%M:%S")))
     cfg = load_config()
     if not cfg.get("enabled", True):
         print("[Scheduler] Мониторинг выключен, пропускаем.")
+        _write_last_run(start_ts, 0, False, [])
         return
     if cfg.get("only_workdays", True) and not is_workday():
         print("[Scheduler] Выходной, пропускаем.")
+        _write_last_run(start_ts, 0, False, [])
         return
 
     today = datetime.now(TZ)
@@ -332,6 +352,7 @@ def run_monitor_job():
         cfg["sent_vacancies"] = sorted(sent_ids | seen_ids)
         save_config(cfg)
         print("[Scheduler] Нет новых вакансий.")
+        _write_last_run(start_ts, 0, False, cfg.get("search_queries", []))
         return
 
     # Build text report
@@ -487,6 +508,7 @@ def run_monitor_job():
     new_ids = {v.get("id") for v in new_vacancies}
     cfg["sent_vacancies"] = sorted(sent_ids | new_ids)
     save_config(cfg)
+    _write_last_run(start_ts, len(new_vacancies), True, cfg.get("search_queries", []))
     print("[Scheduler] Задача завершена. Сохранено {} ID.".format(len(cfg["sent_vacancies"])))
 
 scheduler = BackgroundScheduler(timezone=TZ)
