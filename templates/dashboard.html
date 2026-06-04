@@ -49,10 +49,9 @@
     <table class="table table-hover bg-white shadow-sm">
         <thead class="table-dark">
             <tr>
-                <th>Дата</th>
+                <th>Дата формирования</th>
                 <th>Файл</th>
                 <th>Вакансий</th>
-                <th>Источник</th>
                 <th>Действия</th>
             </tr>
         </thead>
@@ -61,14 +60,7 @@
             <tr>
                 <td>{{ r.date }}</td>
                 <td>{{ r.filename }}</td>
-                <td>{{ r.count if r.count is defined else "—" }}</td>
-                <td>
-                    {% if r.source == 'history' %}
-                        <span class="badge bg-warning text-dark">📦 Архив</span>
-                    {% else %}
-                        <span class="badge bg-success">💾 Файл</span>
-                    {% endif %}
-                </td>
+                <td>{{ r.count if r.count is not none else "—" }}</td>
                 <td>
                     <a href="{{ url_for('view_report', filename=r.filename) }}" class="btn btn-sm btn-outline-primary" target="_blank">HTML</a>
                     <a href="{{ url_for('view_report', filename=r.filename.replace('.html', '.txt')) }}" class="btn btn-sm btn-outline-secondary" target="_blank">TXT</a>
