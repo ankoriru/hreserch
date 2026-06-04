@@ -6,11 +6,14 @@ import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
+from pytz import timezone
 from bs4 import BeautifulSoup
 from config import load_config, save_config
 
 OUTPUT_DIR = Path("reports")
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+TZ = timezone("Europe/Moscow")
 
 def get_headers(token):
     headers = {
@@ -24,7 +27,7 @@ def get_headers(token):
     return headers
 
 def is_workday():
-    today = datetime.now().weekday()
+    today = datetime.now(TZ).weekday()
     return today not in (5, 6)
 
 def format_salary(vacancy):
@@ -50,11 +53,10 @@ def format_datetime(published_at):
         return published_at[:16].replace("T", " ")
 
 def parse_date_text(date_text):
-    """Parse relative date text like '3 дня назад', 'вчера', 'сегодня'."""
     if not date_text:
-        return datetime.now().strftime("%Y-%m-%dT%H:%M:%S+0300")
+        return datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S+0300")
     date_text = date_text.lower().strip()
-    today = datetime.now()
+    today = datetime.now(TZ)
     if "сегодня" in date_text:
         return today.strftime("%Y-%m-%dT%H:%M:%S+0300")
     elif "вчера" in date_text:
@@ -69,11 +71,9 @@ def parse_date_text(date_text):
     return today.strftime("%Y-%m-%dT%H:%M:%S+0300")
 
 def matches_query(vacancy_name, query):
-    """Check that ALL words from query appear in vacancy name (case-insensitive, any order)."""
     if not vacancy_name or not query:
         return False
     name_lower = vacancy_name.lower()
-    # Split query by spaces and remove empty parts
     words = [w.strip() for w in query.lower().split() if w.strip()]
     if not words:
         return False
@@ -93,7 +93,6 @@ def fetch_vacancies_api(query, area_id, token, per_page=20):
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             items = data.get("items", [])
-            # Post-filter: all query words must be in vacancy name
             filtered = [item for item in items if matches_query(item.get("name", ""), query)]
             print("[API] Получено {}, после фильтра по названию: {}".format(len(items), len(filtered)))
             return filtered
@@ -106,7 +105,6 @@ def fetch_vacancies_api(query, area_id, token, per_page=20):
         return None
 
 def fetch_vacancies_html(query, area_id):
-    """Fallback: parse HTML search page using BeautifulSoup."""
     url = "https://hh.ru/search/vacancy"
     params = {
         "text": query,
@@ -127,7 +125,6 @@ def fetch_vacancies_html(query, area_id):
         with urllib.request.urlopen(req, timeout=30) as resp:
             html = resp.read().decode("utf-8")
             items = parse_html_vacancies(html)
-            # Post-filter: all query words must be in vacancy name
             filtered = [item for item in items if matches_query(item.get("name", ""), query)]
             print("[HTML] Получено {}, после фильтра по названию: {}".format(len(items), len(filtered)))
             return filtered
@@ -136,18 +133,14 @@ def fetch_vacancies_html(query, area_id):
         return []
 
 def parse_html_vacancies(html):
-    """Parse vacancies from hh.ru HTML using BeautifulSoup."""
     soup = BeautifulSoup(html, "html.parser")
     vacancies = []
-
     cards = soup.find_all("div", attrs={"data-qa": "vacancy-serp__vacancy"})
     if not cards:
         cards = soup.find_all("div", class_=re.compile(r"vacancy-serp-item"))
     if not cards:
         cards = soup.find_all("div", class_=re.compile(r"serp-item"))
-
     print("[HTML Parser] Найдено {} карточек".format(len(cards)))
-
     for card in cards:
         try:
             link_tag = card.find("a", attrs={"data-qa": "vacancy-serp__vacancy-title"})
@@ -155,21 +148,17 @@ def parse_html_vacancies(html):
                 link_tag = card.find("a", href=re.compile(r"/vacancy/\d+"))
             if not link_tag:
                 continue
-
             href = link_tag.get("href", "")
             id_match = re.search(r'/vacancy/(\d+)', href)
             if not id_match:
                 continue
             vid = id_match.group(1)
-
             title = link_tag.get_text(strip=True) if link_tag else "Без названия"
             url = href if href.startswith("http") else "https://hh.ru{}".format(href)
-
             emp_tag = card.find("a", attrs={"data-qa": "vacancy-serp__vacancy-employer"})
             if not emp_tag:
                 emp_tag = card.find("div", class_=re.compile(r"employer"))
             employer = emp_tag.get_text(strip=True) if emp_tag else "Неизвестный"
-
             sal_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-compensation"})
             if not sal_tag:
                 sal_tag = card.find("span", class_=re.compile(r"compensation"))
@@ -183,25 +172,18 @@ def parse_html_vacancies(html):
                         salary = {"from": nums_clean[0], "to": nums_clean[1], "currency": "RUR"}
                     else:
                         salary = {"from": nums_clean[0], "currency": "RUR"}
-
             date_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-date"})
             if not date_tag:
                 date_tag = card.find("span", class_=re.compile(r"date"))
             date_text = date_tag.get_text(strip=True) if date_tag else None
             published = parse_date_text(date_text)
-
             vacancies.append({
-                "id": vid,
-                "name": title,
-                "employer": {"name": employer},
-                "salary": salary,
-                "published_at": published,
-                "alternate_url": url,
+                "id": vid, "name": title, "employer": {"name": employer},
+                "salary": salary, "published_at": published, "alternate_url": url,
             })
         except Exception as e:
             print("[HTML Parser] Ошибка парсинга карточки: {}".format(e))
             continue
-
     return vacancies
 
 def fetch_vacancies(query, area_id, token, per_page=20):
@@ -233,6 +215,7 @@ def send_telegram(token, chat_id, message):
         return False
 
 def run_monitor_job():
+    print("[Scheduler] === Задача запущена в {} ===".format(datetime.now(TZ).strftime("%H:%M:%S")))
     cfg = load_config()
     if not cfg.get("enabled", True):
         print("[Scheduler] Мониторинг выключен, пропускаем.")
@@ -241,7 +224,7 @@ def run_monitor_job():
         print("[Scheduler] Выходной, пропускаем.")
         return
 
-    today = datetime.now()
+    today = datetime.now(TZ)
     date_str = today.strftime("%Y-%m-%d")
     search_period = int(cfg.get("search_period", 1))
     cutoff_date = (today - timedelta(days=search_period - 1)).strftime("%Y-%m-%d")
@@ -273,6 +256,7 @@ def run_monitor_job():
     if not new_vacancies:
         cfg["sent_vacancies"] = sorted(sent_ids | seen_ids)
         save_config(cfg)
+        print("[Scheduler] Нет новых вакансий. История обновлена.")
         return
 
     # Build text report
@@ -390,7 +374,7 @@ def run_monitor_job():
     save_config(cfg)
     print("[Scheduler] Задача завершена. Сохранено {} ID.".format(len(cfg["sent_vacancies"])))
 
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(timezone=TZ)
 
 def init_scheduler():
     if scheduler.running:
@@ -406,7 +390,7 @@ def init_scheduler():
         hour, minute = 9, 0
     scheduler.add_job(run_monitor_job, 'cron', hour=hour, minute=minute, id='vacancy_job')
     scheduler.start()
-    print("[Scheduler] Запущен. Ежедневно в {}:{}".format(hour, minute))
+    print("[Scheduler] Запущен. Ежедневно в {}:{} (MSK)".format(hour, minute))
 
 def update_schedule(new_time):
     try:

@@ -86,7 +86,9 @@ def settings():
         flash("Настройки сохранены", "success")
         return redirect(url_for("settings"))
     telegram_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
-    return render_template("settings.html", cfg=cfg, telegram_ok=telegram_ok)
+    # Prepare search_queries as newline-separated string for textarea
+    search_queries_text = "\n".join(cfg.get("search_queries", []))
+    return render_template("settings.html", cfg=cfg, telegram_ok=telegram_ok, search_queries_text=search_queries_text)
 
 @app.route("/run-now", methods=["POST"])
 @login_required
@@ -125,6 +127,16 @@ def api_reports():
     reports_dir = Path("reports")
     reports = sorted(reports_dir.glob("*.html"), reverse=True)
     return jsonify([{"date": r.stem.replace("vacancies_", ""), "filename": r.name} for r in reports])
+
+@app.route("/api/run", methods=["POST"])
+@login_required
+def api_run():
+    """Manual trigger for testing scheduler."""
+    try:
+        run_monitor_job()
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

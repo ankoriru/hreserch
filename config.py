@@ -27,14 +27,23 @@ DEFAULT_CONFIG = {
 
 def load_config():
     if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            for key, val in DEFAULT_CONFIG.items():
-                if key not in data:
-                    data[key] = val
-            return data
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for key, val in DEFAULT_CONFIG.items():
+                    if key not in data:
+                        data[key] = val
+                print("[Config] Loaded from {}".format(CONFIG_FILE.absolute()))
+                return data
+        except Exception as e:
+            print("[Config] Error loading: {}".format(e))
+    print("[Config] Using defaults (file not found or error)")
     return DEFAULT_CONFIG.copy()
 
 def save_config(cfg):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        print("[Config] Saved to {} — queries: {}".format(CONFIG_FILE.absolute(), cfg.get("search_queries", [])))
+    except Exception as e:
+        print("[Config] Error saving: {}".format(e))
