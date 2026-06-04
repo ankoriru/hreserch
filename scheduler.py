@@ -18,17 +18,6 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 TZ = timezone("Europe/Moscow")
 
-def get_headers(token):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://hh.ru/",
-    }
-    if token:
-        headers["Authorization"] = "Bearer {}".format(token)
-    return headers
-
 def is_workday():
     today = datetime.now(TZ).weekday()
     return today not in (5, 6)
@@ -153,35 +142,6 @@ def matches_query(vacancy_name, query):
         return False
     return all(word in name_lower for word in words)
 
-def fetch_vacancies_api(query, area_id, token, per_page=20, search_period=1):
-    url = "https://api.hh.ru/vacancies"
-    params = {
-        "text": query,
-        "area": area_id,
-        "per_page": per_page,
-        "search_period": search_period,
-    }
-    full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
-    print("[API URL] {}".format(full_url))
-    req = urllib.request.Request(full_url, headers=get_headers(token))
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            items = data.get("items", [])
-            filtered = [item for item in items if matches_query(item.get("name", ""), query)]
-            print("[API] Получено {}, после фильтра: {}".format(len(items), len(filtered)))
-            return filtered
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8") if e.read() else ""
-        print("[API Error] {}: {} — body: {}".format(query, e, body[:500]))
-        return None
-    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-        print("[API Connection Error] {}: {}".format(query, e))
-        return None
-    except Exception as e:
-        print("[API Error] {}: {}".format(query, e))
-        return None
-
 def fetch_vacancies_html(query, area_id, search_period=1):
     url = "https://hh.ru/search/vacancy"
     params = {
@@ -259,11 +219,7 @@ def parse_html_vacancies(html):
             continue
     return vacancies
 
-def fetch_vacancies(query, area_id, token, per_page=20, search_period=1):
-    items = fetch_vacancies_api(query, area_id, token, per_page, search_period)
-    if items is not None:
-        return items
-    print("[Fallback] API не сработал, пробуем HTML-парсинг...")
+def fetch_vacancies(query, area_id, search_period=1):
     return fetch_vacancies_html(query, area_id, search_period)
 
 def _escape_tg(text):
@@ -352,18 +308,12 @@ def run_monitor_job():
     cutoff_date = (today - timedelta(days=search_period - 1)).strftime("%Y-%m-%d")
     print("[Scheduler] Период: {} дн., отсечка: {}".format(search_period, cutoff_date))
 
-    token = cfg.get("hh_access_token", "").strip()
-    if token:
-        print("[Scheduler] Используем HH Access Token")
-    else:
-        print("[Scheduler] HH токен не задан — HTML-парсинг")
-
     sent_ids = set(cfg.get("sent_vacancies", []))
     all_vacancies = []
     seen_ids = set()
 
     for query in cfg.get("search_queries", []):
-        items = fetch_vacancies(query, cfg["area_id"], token, per_page=20, search_period=search_period)
+        items = fetch_vacancies(query, cfg["area_id"], search_period=search_period)
         print('[Scheduler] Запрос "{}" -> {} вакансий'.format(query, len(items)))
         for item in items:
             vid = item.get("id")

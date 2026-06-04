@@ -22,7 +22,6 @@ DEFAULT_CONFIG = {
     "enabled": True,
     "only_workdays": True,
     "sent_vacancies": [],
-    "hh_access_token": "",
     "reports_history": [],
 }
 
