@@ -57,7 +57,7 @@
         <tbody>
             {% for r in reports %}
             <tr onclick="window.open('{{ url_for('view_report', filename=r.filename) }}', '_blank')" style="cursor:pointer">
-                <td>{{ r.date }}{% if r.time %} {{ r.time[:2] }}:{{ r.time[2:] }}{% endif %}</td>
+                <td>{{ r.date }}{% if r.time %} {{ r.time[:2] }}:{{ r.time[3:] }}{% endif %}</td>
                 <td>{{ r.period }} дн.</td>
                 <td>{{ r.count if r.count is not none else "—" }}</td>
             </tr>
