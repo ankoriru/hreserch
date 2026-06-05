@@ -77,7 +77,9 @@ function doPoll() {
         .then(r => r.json())
         .then(lr => {
             if (lr.finished_at && lr.start_ts >= _runStartTime) {
-                if (lr.has_new) {
+                if (lr.error) {
+                    stopAll('<span class="text-danger fw-bold">\u274c Ошибка: ' + String(lr.error).substring(0, 80) + '</span>', 8000);
+                } else if (lr.has_new) {
                     stopAll('<span class="text-success fw-bold">\u2705 \u041e\u0442\u0447\u0451\u0442 \u0441\u0444\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d</span>', 5000);
                 } else {
                     stopAll('<span class="text-info fw-bold">\u2139\ufe0f \u041d\u043e\u0432\u044b\u0445 \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0439 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</span>', 5000);
