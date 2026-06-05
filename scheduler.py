@@ -43,11 +43,11 @@ def format_datetime(published_at):
     if not published_at:
         return ""
     try:
-        dt_str = published_at.replace("+0300", "+03:00").replace("+02:00", "+02:00")
+        dt_str = str(published_at).replace("+0300", "+03:00").replace("+0200", "+02:00")
         dt = datetime.fromisoformat(dt_str)
         return dt.strftime("%d.%m.%Y %H:%M")
     except Exception:
-        return published_at[:16].replace("T", " ") if len(str(published_at)) > 16 else str(published_at).replace("T", " ")
+        return str(published_at)[:16].replace("T", " ")
 
 def parse_salary_text(text):
     if not text:
@@ -58,19 +58,15 @@ def parse_salary_text(text):
         currency = "USD"
     elif 'EUR' in text or '\u20ac' in text:
         currency = "EUR"
-    # "\u043e\u0442 150 000 \u0434\u043e 300 000 \u20bd"
     match = re.search(r'\u043e\u0442\s+(\d[\d\s]*)\s+\u0434\u043e\s+(\d[\d\s]*)', text, re.IGNORECASE)
     if match:
         return {"from": int(match.group(1).replace(' ', '')), "to": int(match.group(2).replace(' ', '')), "currency": currency}
-    # "\u0434\u043e 200 000 \u20bd"
     match = re.search(r'\u0434\u043e\s+(\d[\d\s]*)', text, re.IGNORECASE)
     if match:
         return {"to": int(match.group(1).replace(' ', '')), "currency": currency}
-    # "\u043e\u0442 150 000 \u20bd"
     match = re.search(r'\u043e\u0442\s+(\d[\d\s]*)', text, re.IGNORECASE)
     if match:
         return {"from": int(match.group(1).replace(' ', '')), "currency": currency}
-    # "150 000 \u20bd" or "150000 \u20bd"
     if any(c in text for c in ['\u20bd', '\u0440\u0443\u0431', 'USD', 'EUR', '$', '\u20ac']):
         nums = re.findall(r'\d[\d\s]*', text)
         nums_clean = [int(n.replace(' ', '')) for n in nums if n.strip().replace(' ', '').isdigit()]
@@ -82,7 +78,6 @@ def parse_salary_text(text):
     return None
 
 def find_salary_in_card(card):
-    # Primary: HH standard compensation tag
     sal_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-compensation"})
     if sal_tag:
         txt = sal_tag.get_text(strip=True, separator=' ')
@@ -90,7 +85,6 @@ def find_salary_in_card(card):
             sal = parse_salary_text(txt)
             if sal:
                 return sal
-    # Fallback: search any element with salary-like class
     for cls in ["compensation", "salary", "sidebar"]:
         for tag in card.find_all(class_=re.compile(cls)):
             txt = tag.get_text(strip=True, separator=' ')
@@ -101,8 +95,7 @@ def find_salary_in_card(card):
     return None
 
 def parse_date_text(date_text):
-    """Parse relative date text from HH listing. Returns date at 23:59:59
-    so vacancy is NOT filtered out by hour-based cutoff on period boundary."""
+    """Parse relative date text. Returns date at 23:59:59 so vacancy passes hour-based cutoff."""
     today = datetime.now(TZ)
     if not date_text:
         return today.strftime("%Y-%m-%dT23:59:59+03:00")
@@ -119,51 +112,24 @@ def parse_date_text(date_text):
             return (today - timedelta(days=int(nums[0]))).strftime("%Y-%m-%dT23:59:59+03:00")
     return today.strftime("%Y-%m-%dT23:59:59+03:00")
 
-def matches_query(vacancy_name, query):
-    if not vacancy_name or not query:
-        return False
-    name_lower = vacancy_name.lower()
-    query_lower = query.lower()
-    if query_lower in name_lower:
-        return True
-    words = [w.strip() for w in query_lower.split() if w.strip()]
-    if not words:
-        return False
-    return all(word in name_lower for word in words)
-
-def fetch_vacancies_html(query, area_id, search_period=1):
-    url = "https://hh.ru/search/vacancy"
-    params = {
-        "text": query,
-        "area": area_id,
-        "order_by": "publication_time",
-        "search_period": search_period,
-        "items_on_page": 100,
-    }
-    full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
-    print("[HTML URL] {}".format(full_url))
-    req = urllib.request.Request(full_url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html",
-        "Accept-Language": "ru-RU,ru;q=0.9",
-        "Referer": "https://hh.ru/",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            html = resp.read().decode("utf-8")
-            items = parse_html_vacancies(html, query)
-            print("[HTML] Получено {}, после фильтра: {}".format(len(items[0]) if isinstance(items, tuple) else len(items), len(items)))
-            return items
-    except Exception as e:
-        print("[HTML Error] {}: {}".format(query, e))
-        return []
-
-def parse_html_vacancies(html, query=""):
+def parse_html_vacancies(html):
     soup = BeautifulSoup(html, "html.parser")
     vacancies = []
+    # Try multiple selectors for vacancy cards
     cards = soup.find_all("div", attrs={"data-qa": "vacancy-serp__vacancy"})
     if not cards:
         cards = soup.find_all("div", class_=re.compile(r"vacancy-serp-item|serp-item"))
+    if not cards:
+        cards = soup.find_all("div", class_=re.compile(r"magritte.*vacancy"))
+    if not cards:
+        all_divs = soup.find_all("div")
+        seen = set()
+        for div in all_divs:
+            if div in seen:
+                continue
+            if div.find("a", href=re.compile(r"/vacancy/\d+")):
+                cards.append(div)
+                seen.add(div)
     print("[HTML Parser] Найдено {} карточек".format(len(cards)))
     for card in cards:
         try:
@@ -187,7 +153,7 @@ def parse_html_vacancies(html, query=""):
 
             salary = find_salary_in_card(card)
 
-            # Try <time datetime> first
+            # Get date from <time datetime>
             published = None
             time_tag = card.find("time")
             if time_tag and time_tag.get("datetime"):
@@ -206,15 +172,41 @@ def parse_html_vacancies(html, query=""):
                 date_text = date_tag.get_text(strip=True, separator=' ') if date_tag else None
                 published = parse_date_text(date_text)
 
-            if matches_query(title, query):
-                vacancies.append({
-                    "id": vid, "name": title, "employer": {"name": employer},
-                    "salary": salary, "published_at": published, "alternate_url": url,
-                })
+            vacancies.append({
+                "id": vid, "name": title, "employer": {"name": employer},
+                "salary": salary, "published_at": published, "alternate_url": url,
+            })
         except Exception as e:
             print("[HTML Parser] Ошибка карточки: {}".format(e))
             continue
     return vacancies
+
+def fetch_vacancies_html(query, area_id, search_period=1):
+    url = "https://hh.ru/search/vacancy"
+    params = {
+        "text": query,
+        "area": area_id,
+        "order_by": "publication_time",
+        "search_period": search_period,
+        "items_on_page": 100,
+    }
+    full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
+    print("[HTML URL] {}".format(full_url))
+    req = urllib.request.Request(full_url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Referer": "https://hh.ru/",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            html = resp.read().decode("utf-8")
+            items = parse_html_vacancies(html)
+            print("[HTML] Получено {}, после фильтра: {}".format(len(items), len(items)))
+            return items
+    except Exception as e:
+        print("[HTML Error] {}: {}".format(query, e))
+        return []
 
 def fetch_vacancies(query, area_id, search_period=1):
     return fetch_vacancies_html(query, area_id, search_period)
@@ -238,7 +230,7 @@ def send_telegram(token, chat_id, message, retries=3):
         except urllib.error.HTTPError as e:
             if 400 <= e.code < 500:
                 return False
-        except Exception as e:
+        except Exception:
             if attempt < retries:
                 time.sleep(5)
     return False
@@ -259,15 +251,16 @@ def cleanup_old_reports(days=7):
     if count > 0:
         print("[Cleanup] Удалено {} старых отч\u0451тов".format(count))
 
-def _write_last_run(start_ts, new_count, has_new, queries, error=None):
+def _write_last_run(start_ts, new_count, has_new, queries, finished=True, error=None):
     try:
         last_run = {
             "start_ts": start_ts,
-            "finished_at": datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S"),
             "new_count": new_count,
             "has_new": has_new,
             "queries": queries,
         }
+        if finished:
+            last_run["finished_at"] = datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S")
         if error:
             last_run["error"] = str(error)
         with open(OUTPUT_DIR / "last_run.json", "w", encoding="utf-8") as f:
@@ -285,15 +278,15 @@ def run_monitor_job():
         print("[Scheduler] === Задача запущена в {} ===".format(start_ts))
         cfg = load_config()
         queries_ran = cfg.get("search_queries", [])
-        # Mark job as started (no finished_at yet)
-        _write_last_run(start_ts, 0, False, queries_ran)
+        # Mark job as started WITHOUT finished_at — JS will keep polling
+        _write_last_run(start_ts, 0, False, queries_ran, finished=False)
         if not cfg.get("enabled", True):
             print("[Scheduler] Мониторинг выключен, пропускаем.")
-            _write_last_run(start_ts, 0, False, queries_ran)
+            _write_last_run(start_ts, 0, False, queries_ran, finished=True)
             return
         if cfg.get("only_workdays", True) and not is_workday():
             print("[Scheduler] Выходной, пропускаем.")
-            _write_last_run(start_ts, 0, False, queries_ran)
+            _write_last_run(start_ts, 0, False, queries_ran, finished=True)
             return
 
         today = datetime.now(TZ)
@@ -334,7 +327,7 @@ def run_monitor_job():
                         seen_ids.add(vid)
                         all_vacancies.append(item)
                     except Exception as inner_e:
-                        print("[Scheduler] Ошибка обработки вакансии {}: {}".format(vid, inner_e))
+                        print("[Scheduler] Ошибка обработки вакансии: {}".format(inner_e))
                         continue
             except Exception as query_e:
                 print("[Scheduler] Ошибка запроса '{}': {}".format(query, query_e))
@@ -343,17 +336,12 @@ def run_monitor_job():
         new_vacancies = [v for v in all_vacancies if v.get("id") not in sent_ids]
         new_count = len(new_vacancies)
         print("[Scheduler] Всего за период: {}, Новых: {}".format(len(all_vacancies), new_count))
-        if all_vacancies:
-            for i, v in enumerate(all_vacancies[:3]):
-                print("[Scheduler] Вакансия {}: {} | {} | pub={}".format(
-                    i+1, v.get("name","")[:50], v.get("employer",{}).get("name","")[:30], v.get("published_at","")[:16]))
 
         if not new_vacancies:
             cfg["sent_vacancies"] = sorted(sent_ids | seen_ids)
             save_config(cfg)
             print("[Scheduler] Нет новых вакансий.")
-            has_new = False
-            _write_last_run(start_ts, 0, False, queries_ran)
+            _write_last_run(start_ts, 0, False, queries_ran, finished=True)
             return
 
         # Build text report
@@ -414,14 +402,12 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
         with open(OUTPUT_DIR / html_filename, "w", encoding="utf-8") as f:
             f.write(html)
 
-        # Save meta.json
         meta = {"date": date_str, "time": time_str, "period": search_period_days,
                 "cutoff": cutoff_dt.strftime("%Y-%m-%dT%H:%M"), "count": new_count,
                 "queries": queries_ran}
         with open(OUTPUT_DIR / "vacancies_{}_{}.meta.json".format(date_str, time_str), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        # Save to config history
         report_meta = {"date": date_str, "time": time_str, "period": search_period_days,
                        "count": new_count, "filename_html": html_filename,
                        "filename_txt": txt_filename, "html_content": html, "txt_content": text_report}
@@ -433,7 +419,6 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
 
         cleanup_old_reports(days=7)
 
-        # Send Telegram
         token_tg = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
         if token_tg and chat_id:
@@ -460,15 +445,14 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
         cfg["sent_vacancies"] = sorted(sent_ids | new_ids)
         save_config(cfg)
         has_new = True
-        _write_last_run(start_ts, new_count, True, queries_ran)
+        _write_last_run(start_ts, new_count, True, queries_ran, finished=True)
         print("[Scheduler] Задача завершена.")
     except Exception as e:
         error_msg = str(e)
         print("[Scheduler] КРИТИЧЕСКАЯ ОШИБКА: {}".format(error_msg))
         import traceback
         traceback.print_exc()
-        # Always write last_run so frontend knows job is done (with error)
-        _write_last_run(start_ts, new_count, has_new, queries_ran, error=error_msg)
+        _write_last_run(start_ts, new_count, has_new, queries_ran, finished=True, error=error_msg)
 
 scheduler = BackgroundScheduler(timezone=TZ)
 
@@ -494,4 +478,4 @@ def update_schedule(new_time):
         else:
             scheduler.add_job(run_monitor_job, 'cron', hour=h, minute=m, id='vacancy_job')
     except Exception as e:
-        print("[Scheduler] Ошибка: {}".format(e))
+        print("[Scheduler] Ошибка переназначения: {}".format(e))
