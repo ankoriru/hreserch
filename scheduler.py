@@ -95,7 +95,6 @@ def find_salary_in_card(card):
     return None
 
 def parse_date_text(date_text):
-    """Parse relative date text. Returns date at 23:59:59 so vacancy passes hour-based cutoff."""
     today = datetime.now(TZ)
     if not date_text:
         return today.strftime("%Y-%m-%dT23:59:59+03:00")
@@ -115,21 +114,9 @@ def parse_date_text(date_text):
 def parse_html_vacancies(html):
     soup = BeautifulSoup(html, "html.parser")
     vacancies = []
-    # Try multiple selectors for vacancy cards
     cards = soup.find_all("div", attrs={"data-qa": "vacancy-serp__vacancy"})
     if not cards:
         cards = soup.find_all("div", class_=re.compile(r"vacancy-serp-item|serp-item"))
-    if not cards:
-        cards = soup.find_all("div", class_=re.compile(r"magritte.*vacancy"))
-    if not cards:
-        all_divs = soup.find_all("div")
-        seen = set()
-        for div in all_divs:
-            if div in seen:
-                continue
-            if div.find("a", href=re.compile(r"/vacancy/\d+")):
-                cards.append(div)
-                seen.add(div)
     print("[HTML Parser] Найдено {} карточек".format(len(cards)))
     for card in cards:
         try:
@@ -153,7 +140,6 @@ def parse_html_vacancies(html):
 
             salary = find_salary_in_card(card)
 
-            # Get date from <time datetime>
             published = None
             time_tag = card.find("time")
             if time_tag and time_tag.get("datetime"):
@@ -163,8 +149,6 @@ def parse_html_vacancies(html):
                     published = dt_val
                 except (ValueError, TypeError):
                     pass
-
-            # Fallback: relative text date
             if not published:
                 date_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-date"})
                 if not date_tag:
@@ -181,26 +165,6 @@ def parse_html_vacancies(html):
             continue
     return vacancies
 
-def _get_html_opener():
-    """Create urllib opener with cookie jar for session persistence."""
-    cookie_jar = urllib.request.HTTPCookieProcessor()
-    opener = urllib.request.build_opener(cookie_jar)
-    return opener
-
-def _fetch_hh_session(opener):
-    """Get initial session cookies from hh.ru homepage."""
-    try:
-        req = urllib.request.Request("https://hh.ru/", headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-        })
-        with opener.open(req, timeout=15) as resp:
-            return resp.read().decode("utf-8")
-    except Exception as e:
-        print("[Session] Не удалось получить сессию: {}".format(e))
-        return None
-
 def fetch_vacancies_html(query, area_id, search_period=1):
     url = "https://hh.ru/search/vacancy"
     params = {
@@ -212,41 +176,18 @@ def fetch_vacancies_html(query, area_id, search_period=1):
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
     print("[HTML URL] {}".format(full_url))
-    
-    # Use cookie jar for session
-    opener = _get_html_opener()
-    
-    # First, get session cookies
-    _fetch_hh_session(opener)
-    
-    # Now search with cookies
     req = urllib.request.Request(full_url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": "https://hh.ru/",
     })
     try:
-        with opener.open(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             html = resp.read().decode("utf-8")
-            # Check for captcha/block
-            if 'HHCaptcha' in html or 'captcha' in html.lower():
-                print("[HTML Warning] CAPTCHA detected, trying without cookies...")
-                # Fallback: try without session
-                req2 = urllib.request.Request(full_url, headers={
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "text/html",
-                    "Accept-Language": "ru-RU,ru;q=0.9",
-                    "Referer": "https://hh.ru/",
-                })
-                with urllib.request.urlopen(req2, timeout=30) as resp2:
-                    html = resp2.read().decode("utf-8")
             items = parse_html_vacancies(html)
             print("[HTML] Получено {} вакансий".format(len(items)))
             return items
-    except urllib.error.HTTPError as e:
-        print("[HTML HTTPError] {}: {}".format(query, e.code))
-        return []
     except Exception as e:
         print("[HTML Error] {}: {}".format(query, e))
         return []
@@ -296,12 +237,7 @@ def cleanup_old_reports(days=7):
 
 def _write_last_run(start_ts, new_count, has_new, queries, finished=True, error=None):
     try:
-        last_run = {
-            "start_ts": start_ts,
-            "new_count": new_count,
-            "has_new": has_new,
-            "queries": queries,
-        }
+        last_run = {"start_ts": start_ts, "new_count": new_count, "has_new": has_new, "queries": queries}
         if finished:
             last_run["finished_at"] = datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S")
         if error:
@@ -312,13 +248,10 @@ def _write_last_run(start_ts, new_count, has_new, queries, finished=True, error=
         print("[Scheduler] Ошибка записи last_run: {}".format(e))
 
 def _build_and_save_report(vacancies, date_str, time_str, search_period_days, cutoff_dt, queries_ran, cfg, send_tg=False):
-    """Build HTML/txt reports, save files, update history. Returns (count, html_filename, txt_filename)."""
     count = len(vacancies)
     if count == 0:
         return 0, None, None
-
     today = datetime.now(TZ)
-    # Text report
     lines = []
     lines.append("\ud83d\udccb Вакансии \u2014 {}".format(date_str))
     lines.append("\u041f\u0435\u0440\u0438\u043e\u0434: {} \u0434\u043d. | \u041d\u0430\u0439\u0434\u0435\u043d\u043e: {}".format(search_period_days, count))
@@ -335,7 +268,6 @@ def _build_and_save_report(vacancies, date_str, time_str, search_period_days, cu
     with open(OUTPUT_DIR / txt_filename, "w", encoding="utf-8") as f:
         f.write(text_report)
 
-    # HTML report
     items_html = []
     for v in vacancies:
         title = v.get("name", "\u0411\u0435\u0437 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u044f")
@@ -375,14 +307,12 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
     with open(OUTPUT_DIR / html_filename, "w", encoding="utf-8") as f:
         f.write(html)
 
-    # Meta
     meta = {"date": date_str, "time": time_str, "period": search_period_days,
             "cutoff": cutoff_dt.strftime("%Y-%m-%dT%H:%M"), "count": count,
             "queries": queries_ran}
     with open(OUTPUT_DIR / "vacancies_{}_{}.meta.json".format(date_str, time_str), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    # History
     report_meta = {"date": date_str, "time": time_str, "period": search_period_days,
                    "count": count, "filename_html": html_filename,
                    "filename_txt": txt_filename, "html_content": html, "txt_content": text_report}
@@ -391,10 +321,8 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
     if len(history) > 30:
         history = history[-30:]
     cfg["reports_history"] = history
-
     cleanup_old_reports(days=7)
 
-    # Telegram
     if send_tg:
         token_tg = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -422,20 +350,13 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
 
 
 def run_monitor_job(force=False):
-    """Run vacancy search.
-    force=True: manual run — report ALL vacancies (ignore sent_vacancies).
-    force=False: scheduled — report only NEW vacancies, update sent_vacancies.
-    """
     start_ts = datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S")
     queries_ran = []
-    error_msg = None
     try:
         mode = "РУЧНОЙ" if force else "авто"
         print("[Scheduler] === {} запуск в {} ===".format(mode, start_ts))
         cfg = load_config()
         queries_ran = cfg.get("search_queries", [])
-        # Mark started (no finished_at)
-        _write_last_run(start_ts, 0, False, queries_ran, finished=False)
 
         if not cfg.get("enabled", True) and not force:
             print("[Scheduler] Мониторинг выключен, пропускаем.")
@@ -492,10 +413,8 @@ def run_monitor_job(force=False):
         print("[Scheduler] Всего уникальных за период: {}".format(len(all_vacancies)))
 
         if force:
-            # Manual: report ALL vacancies, don't update sent_vacancies
             report_vacancies = all_vacancies
         else:
-            # Scheduled: only new ones
             report_vacancies = [v for v in all_vacancies if v.get("id") not in sent_ids]
 
         count = len(report_vacancies)
@@ -504,7 +423,7 @@ def run_monitor_job(force=False):
         if count > 0:
             count, html_fn, txt_fn = _build_and_save_report(
                 report_vacancies, date_str, time_str, search_period_days, cutoff_dt, queries_ran, cfg,
-                send_tg=(not force))  # Telegram only for scheduled
+                send_tg=(not force))
             if not force:
                 new_ids = {v.get("id") for v in report_vacancies}
                 cfg["sent_vacancies"] = sorted(sent_ids | new_ids)
@@ -519,11 +438,10 @@ def run_monitor_job(force=False):
             print("[Scheduler] Нет вакансий для отчёта.")
 
     except Exception as e:
-        error_msg = str(e)
-        print("[Scheduler] КРИТИЧЕСКАЯ ОШИБКА: {}".format(error_msg))
+        print("[Scheduler] КРИТИЧЕСКАЯ ОШИБКА: {}".format(e))
         import traceback
         traceback.print_exc()
-        _write_last_run(start_ts, 0, False, queries_ran, finished=True, error=error_msg)
+        _write_last_run(start_ts, 0, False, queries_ran, finished=True, error=str(e))
 
 scheduler = BackgroundScheduler(timezone=TZ)
 
