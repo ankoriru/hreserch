@@ -100,39 +100,6 @@ def find_salary_in_card(card):
                     return sal
     return None
 
-def fetch_vacancy_detail(vid):
-    """Fetch detailed vacancy page to get exact published_at."""
-    url = "https://hh.ru/vacancy/{}".format(vid)
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html",
-        "Accept-Language": "ru-RU,ru;q=0.9",
-        "Referer": "https://hh.ru/",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8")
-            soup = BeautifulSoup(html, "html.parser")
-            # Try <time datetime="2026-06-05T10:30:00+03:00">
-            time_tag = soup.find("time")
-            if time_tag and time_tag.get("datetime"):
-                return time_tag["datetime"]
-            # Try <meta itemprop="datePublished" content="2026-06-05">
-            meta = soup.find("meta", attrs={"itemprop": "datePublished"})
-            if meta and meta.get("content"):
-                return meta["content"] + "T00:00:00+03:00"
-            # Try text search
-            for tag in soup.find_all(["span", "div", "p"]):
-                txt = tag.get_text(strip=True)
-                if "\u043e\u043f\u0443\u0431\u043b\u0438\u043a\u043e\u0432\u0430\u043d\u043e" in txt.lower():
-                    # Extract ISO-like date
-                    dm = re.search(r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2})', txt)
-                    if dm:
-                        return dm.group(1).replace(" ", "T") + "+03:00"
-    except Exception as e:
-        print("[Detail] Ошибка загрузки вакансии {}: {}".format(vid, e))
-    return None
-
 def parse_date_text(date_text):
     """Parse relative date text from HH listing. Returns date without time."""
     today = datetime.now(TZ)
@@ -320,7 +287,7 @@ def run_monitor_job():
 
     today = datetime.now(TZ)
     date_str = today.strftime("%Y-%m-%d")
-    time_str = today.strftime("H-%M")
+    time_str = today.strftime("%H-%M")
     search_period_days = int(cfg.get("search_period", 1))
     hours = PERIOD_HOURS.get(search_period_days, search_period_days * 24)
     cutoff_dt = today - timedelta(hours=hours)
@@ -338,22 +305,21 @@ def run_monitor_job():
             vid = item.get("id")
             if not vid or vid in seen_ids:
                 continue
-            # Try to get exact date from detail page
-            detail_date = fetch_vacancy_detail(vid)
-            if detail_date:
-                item["published_at"] = detail_date
-                print("[Detail] {} -> {}".format(vid, detail_date[:16]))
             # Check cutoff using HOURS not days
             pub_str = item.get("published_at", "")
             try:
-                pub_dt = datetime.fromisoformat(pub_str.replace("+0300", "+03:00").replace("+02:00", "+02:00"))
+                dt_str = pub_str.replace("+0300", "+03:00").replace("+02:00", "+02:00")
+                pub_dt = datetime.fromisoformat(dt_str)
+                # Ensure timezone-aware comparison
+                if pub_dt.tzinfo is None:
+                    pub_dt = TZ.localize(pub_dt)
                 if pub_dt < cutoff_dt:
                     continue  # Too old
             except Exception:
-                # Can't parse date, use string comparison as fallback
-                pub_date = pub_str[:10]
-                cutoff_date = cutoff_dt.strftime("%Y-%m-%d")
-                if pub_date < cutoff_date:
+                # Fallback: string comparison by date portion
+                pub_date = pub_str[:10] if pub_str else ""
+                cutoff_date_str = cutoff_dt.strftime("%Y-%m-%d")
+                if pub_date and pub_date < cutoff_date_str:
                     continue
             seen_ids.add(vid)
             all_vacancies.append(item)
