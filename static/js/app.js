@@ -76,7 +76,8 @@ function doPoll() {
     fetch('/api/last_run')
         .then(r => r.json())
         .then(lr => {
-            if (lr.finished_at && lr.start_ts >= _runStartTime) {
+            // Job must have finished_at AND start_ts >= our run click time
+            if (lr.start_ts >= _runStartTime && lr.finished_at) {
                 if (lr.error) {
                     stopAll('<span class="text-danger fw-bold">\u274c Ошибка: ' + String(lr.error).substring(0, 80) + '</span>', 8000);
                 } else if (lr.has_new) {
@@ -86,8 +87,9 @@ function doPoll() {
                 }
                 return;
             }
+            // No finished_at yet — job still running
             if (_pollCount >= MAX_POLLS) {
-                stopAll('<span class="text-muted">\u23f0 \u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e</span>', 3000);
+                stopAll('<span class="text-muted">\u23f0 \u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u0437\u0430\u043d\u044f\u043b\u0430 \u0441\u043b\u0438\u0448\u043a\u043e\u043c \u0434\u043e\u043b\u0433\u043e, \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u043e\u0437\u0436\u0435</span>', 8000);
             }
         })
         .catch(() => {
