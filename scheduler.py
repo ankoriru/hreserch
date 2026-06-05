@@ -101,22 +101,23 @@ def find_salary_in_card(card):
     return None
 
 def parse_date_text(date_text):
-    """Parse relative date text from HH listing. Returns date without time."""
+    """Parse relative date text from HH listing. Returns date at 23:59:59
+    so vacancy is NOT filtered out by hour-based cutoff on period boundary."""
     today = datetime.now(TZ)
     if not date_text:
-        return today.strftime("%Y-%m-%dT00:00:00+03:00")
+        return today.strftime("%Y-%m-%dT23:59:59+03:00")
     dt = date_text.lower().strip()
-    if "\u0441\u0435\u0433\u043e\u0434\u043d\u044f" in dt or "\u0447\u0430\u0441" in dt or "\u043c\u0438\u043d\u0443\u0442" in dt:
-        return today.strftime("%Y-%m-%dT00:00:00+03:00")
+    if "\u0441\u0435\u0433\u043e\u0434\u043d\u044f" in dt or "\u0447\u0430\u0441" in dt or "\u043c\u0438\u043d\u0443\u0442" in dt or "\u0442\u043e\u043b\u044c\u043a\u043e \u0447\u0442\u043e" in dt:
+        return today.strftime("%Y-%m-%dT23:59:59+03:00")
     elif "\u0432\u0447\u0435\u0440\u0430" in dt:
-        return (today - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00+03:00")
+        return (today - timedelta(days=1)).strftime("%Y-%m-%dT23:59:59+03:00")
     elif "\u043d\u0435\u0434\u0435\u043b" in dt:
-        return (today - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00+03:00")
+        return (today - timedelta(days=7)).strftime("%Y-%m-%dT23:59:59+03:00")
     else:
         nums = re.findall(r'\d+', dt)
         if nums:
-            return (today - timedelta(days=int(nums[0]))).strftime("%Y-%m-%dT00:00:00+03:00")
-    return today.strftime("%Y-%m-%dT00:00:00+03:00")
+            return (today - timedelta(days=int(nums[0]))).strftime("%Y-%m-%dT23:59:59+03:00")
+    return today.strftime("%Y-%m-%dT23:59:59+03:00")
 
 def matches_query(vacancy_name, query):
     if not vacancy_name or not query:
@@ -137,7 +138,7 @@ def fetch_vacancies_html(query, area_id, search_period=1):
         "area": area_id,
         "order_by": "publication_time",
         "search_period": search_period,
-        "items_on_page": 20,
+        "items_on_page": 100,
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
     print("[HTML URL] {}".format(full_url))
@@ -342,6 +343,10 @@ def run_monitor_job():
         new_vacancies = [v for v in all_vacancies if v.get("id") not in sent_ids]
         new_count = len(new_vacancies)
         print("[Scheduler] Всего за период: {}, Новых: {}".format(len(all_vacancies), new_count))
+        if all_vacancies:
+            for i, v in enumerate(all_vacancies[:3]):
+                print("[Scheduler] Вакансия {}: {} | {} | pub={}".format(
+                    i+1, v.get("name","")[:50], v.get("employer",{}).get("name","")[:30], v.get("published_at","")[:16]))
 
         if not new_vacancies:
             cfg["sent_vacancies"] = sorted(sent_ids | seen_ids)
