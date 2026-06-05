@@ -159,7 +159,7 @@ def settings():
 def run_now():
     def _job():
         try:
-            run_monitor_job()
+            run_monitor_job(force=True)
         except Exception as e:
             print("[Run-Now] Ошибка в фоне: {}".format(e))
 
@@ -228,7 +228,7 @@ def api_last_run():
 @login_required
 def api_run():
     try:
-        threading.Thread(target=run_monitor_job, daemon=True).start()
+        threading.Thread(target=lambda: run_monitor_job(force=True), daemon=True).start()
         return jsonify({"status": "ok", "message": "Задача запущена в фоне"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500

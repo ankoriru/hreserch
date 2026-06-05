@@ -311,119 +311,49 @@ def _write_last_run(start_ts, new_count, has_new, queries, finished=True, error=
     except Exception as e:
         print("[Scheduler] Ошибка записи last_run: {}".format(e))
 
-def run_monitor_job():
-    start_ts = datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S")
-    queries_ran = []
-    new_count = 0
-    has_new = False
-    error_msg = None
-    try:
-        print("[Scheduler] === Задача запущена в {} ===".format(start_ts))
-        cfg = load_config()
-        queries_ran = cfg.get("search_queries", [])
-        # Mark job as started WITHOUT finished_at — JS will keep polling
-        _write_last_run(start_ts, 0, False, queries_ran, finished=False)
-        if not cfg.get("enabled", True):
-            print("[Scheduler] Мониторинг выключен, пропускаем.")
-            _write_last_run(start_ts, 0, False, queries_ran, finished=True)
-            return
-        if cfg.get("only_workdays", True) and not is_workday():
-            print("[Scheduler] Выходной, пропускаем.")
-            _write_last_run(start_ts, 0, False, queries_ran, finished=True)
-            return
+def _build_and_save_report(vacancies, date_str, time_str, search_period_days, cutoff_dt, queries_ran, cfg, send_tg=False):
+    """Build HTML/txt reports, save files, update history. Returns (count, html_filename, txt_filename)."""
+    count = len(vacancies)
+    if count == 0:
+        return 0, None, None
 
-        today = datetime.now(TZ)
-        date_str = today.strftime("%Y-%m-%d")
-        time_str = today.strftime("%H-%M")
-        search_period_days = int(cfg.get("search_period", 1))
-        hours = PERIOD_HOURS.get(search_period_days, search_period_days * 24)
-        cutoff_dt = today - timedelta(hours=hours)
-        cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S+03:00")
-        print("[Scheduler] Период: {} дн. ({} ч.), отсечка: {}".format(search_period_days, hours, cutoff_iso))
-
-        sent_ids = set(cfg.get("sent_vacancies", []))
-        all_vacancies = []
-        seen_ids = set()
-
-        for query in cfg.get("search_queries", []):
-            try:
-                items = fetch_vacancies(query, cfg["area_id"], search_period=search_period_days)
-                print('[Scheduler] Запрос "{}" -> {} вакансий'.format(query, len(items)))
-                for item in items:
-                    try:
-                        vid = item.get("id")
-                        if not vid or vid in seen_ids:
-                            continue
-                        pub_str = item.get("published_at", "")
-                        try:
-                            dt_str = pub_str.replace("+0300", "+03:00").replace("+02:00", "+02:00")
-                            pub_dt = datetime.fromisoformat(dt_str)
-                            if pub_dt.tzinfo is None:
-                                pub_dt = TZ.localize(pub_dt)
-                            if pub_dt < cutoff_dt:
-                                continue
-                        except Exception:
-                            pub_date = pub_str[:10] if pub_str else ""
-                            cutoff_date_str = cutoff_dt.strftime("%Y-%m-%d")
-                            if pub_date and pub_date < cutoff_date_str:
-                                continue
-                        seen_ids.add(vid)
-                        all_vacancies.append(item)
-                    except Exception as inner_e:
-                        print("[Scheduler] Ошибка обработки вакансии: {}".format(inner_e))
-                        continue
-            except Exception as query_e:
-                print("[Scheduler] Ошибка запроса '{}': {}".format(query, query_e))
-                continue
-
-        new_vacancies = [v for v in all_vacancies if v.get("id") not in sent_ids]
-        new_count = len(new_vacancies)
-        print("[Scheduler] Всего за период: {}, Новых: {}".format(len(all_vacancies), new_count))
-
-        if not new_vacancies:
-            cfg["sent_vacancies"] = sorted(sent_ids | seen_ids)
-            save_config(cfg)
-            print("[Scheduler] Нет новых вакансий.")
-            _write_last_run(start_ts, 0, False, queries_ran, finished=True)
-            return
-
-        # Build text report
-        lines = []
-        lines.append("\ud83d\udccb Новые вакансии \u2014 {}".format(date_str))
-        lines.append("\u041f\u0435\u0440\u0438\u043e\u0434: {} \u0434\u043d. | \u041d\u0430\u0439\u0434\u0435\u043d\u043e: {}".format(search_period_days, new_count))
+    today = datetime.now(TZ)
+    # Text report
+    lines = []
+    lines.append("\ud83d\udccb Вакансии \u2014 {}".format(date_str))
+    lines.append("\u041f\u0435\u0440\u0438\u043e\u0434: {} \u0434\u043d. | \u041d\u0430\u0439\u0434\u0435\u043d\u043e: {}".format(search_period_days, count))
+    lines.append("")
+    for v in vacancies:
+        lines.append("\u2022 {}".format(v.get("name", "")))
+        lines.append("  \u041a\u043e\u043c\u043f\u0430\u043d\u0438\u044f: {}".format(v.get("employer", {}).get("name", "")))
+        lines.append("  \u0417\u0430\u0440\u043f\u043b\u0430\u0442\u0430: {}".format(format_salary(v)))
+        lines.append("  \u0414\u0430\u0442\u0430: {}".format(format_datetime(v.get("published_at", ""))))
+        lines.append("  \u0421\u0441\u044b\u043b\u043a\u0430: {}".format(v.get("alternate_url", "")))
         lines.append("")
-        for v in new_vacancies:
-            lines.append("\u2022 {}".format(v.get("name", "")))
-            lines.append("  \u041a\u043e\u043c\u043f\u0430\u043d\u0438\u044f: {}".format(v.get("employer", {}).get("name", "")))
-            lines.append("  \u0417\u0430\u0440\u043f\u043b\u0430\u0442\u0430: {}".format(format_salary(v)))
-            lines.append("  \u0414\u0430\u0442\u0430: {}".format(format_datetime(v.get("published_at", ""))))
-            lines.append("  \u0421\u0441\u044b\u043b\u043a\u0430: {}".format(v.get("alternate_url", "")))
-            lines.append("")
+    text_report = "\n".join(lines)
+    txt_filename = "vacancies_{}_{}.txt".format(date_str, time_str)
+    with open(OUTPUT_DIR / txt_filename, "w", encoding="utf-8") as f:
+        f.write(text_report)
 
-        text_report = "\n".join(lines)
-        txt_filename = "vacancies_{}_{}.txt".format(date_str, time_str)
-        with open(OUTPUT_DIR / txt_filename, "w", encoding="utf-8") as f:
-            f.write(text_report)
+    # HTML report
+    items_html = []
+    for v in vacancies:
+        title = v.get("name", "\u0411\u0435\u0437 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u044f")
+        employer = v.get("employer", {}).get("name", "\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439")
+        url = v.get("alternate_url", "")
+        salary = format_salary(v)
+        published = format_datetime(v.get("published_at", ""))
+        items_html.append(
+            '<div class="vacancy">\n'
+            '  <h3><a href="{}" target="_blank">{}</a></h3>\n'
+            '  <p><strong>\u041a\u043e\u043c\u043f\u0430\u043d\u0438\u044f:</strong> {}</p>\n'
+            '  <p><strong>\u0417\u0430\u0440\u043f\u043b\u0430\u0442\u0430:</strong> {}</p>\n'
+            '  <p><strong>\u0414\u0430\u0442\u0430 \u043f\u0443\u0431\u043b\u0438\u043a\u0430\u0446\u0438\u0438:</strong> {}</p>\n'
+            '  <p><a href="{}" target="_blank">\u041e\u0442\u043a\u0440\u044b\u0442\u044c на hh.ru \u2192</a></p>\n'
+            '</div>'.format(url, title, employer, salary, published, url)
+        )
 
-        # Build HTML report
-        items_html = []
-        for v in new_vacancies:
-            title = v.get("name", "\u0411\u0435\u0437 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u044f")
-            employer = v.get("employer", {}).get("name", "\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439")
-            url = v.get("alternate_url", "")
-            salary = format_salary(v)
-            published = format_datetime(v.get("published_at", ""))
-            items_html.append(
-                '<div class="vacancy">\n'
-                '  <h3><a href="{}" target="_blank">{}</a></h3>\n'
-                '  <p><strong>\u041a\u043e\u043c\u043f\u0430\u043d\u0438\u044f:</strong> {}</p>\n'
-                '  <p><strong>\u0417\u0430\u0440\u043f\u043b\u0430\u0442\u0430:</strong> {}</p>\n'
-                '  <p><strong>\u0414\u0430\u0442\u0430 \u043f\u0443\u0431\u043b\u0438\u043a\u0430\u0446\u0438\u0438:</strong> {}</p>\n'
-                '  <p><a href="{}" target="_blank">\u041e\u0442\u043a\u0440\u044b\u0442\u044c на hh.ru \u2192</a></p>\n'
-                '</div>'.format(url, title, employer, salary, published, url)
-            )
-
-        html = """<!DOCTYPE html>
+    html = """<!DOCTYPE html>
 <html lang="ru">
 <head><meta charset="UTF-8"><title>\u0412\u0430\u043a\u0430\u043d\u0441\u0438\u0438 \u2014 {}</title>
 <style>body{{font-family:Arial,sans-serif;max-width:800px;margin:40px auto;padding:0 20px;color:#333}}
@@ -435,40 +365,44 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
 </head>
 <body>
 <div class="back"><a href="/dashboard">\u2190 \u041d\u0430\u0437\u0430\u0434</a></div>
-<h1>\ud83d\udccb \u041d\u043e\u0432\u044b\u0435 \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0438</h1>
+<h1>\ud83d\udccb Вакансии</h1>
 <p>\u041f\u0435\u0440\u0438\u043e\u0434: <strong>{} \u0434\u043d.</strong> | \u041d\u0430\u0439\u0434\u0435\u043d\u043e: <strong>{}</strong></p>
 {}
 <p class="meta">\u0421\u0444\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u043e {}</p>
-</body></html>""".format(date_str, search_period_days, new_count, "\n".join(items_html), today.strftime("%d.%m.%Y %H:%M"))
+</body></html>""".format(date_str, search_period_days, count, "\n".join(items_html), today.strftime("%d.%m.%Y %H:%M"))
 
-        html_filename = "vacancies_{}_{}.html".format(date_str, time_str)
-        with open(OUTPUT_DIR / html_filename, "w", encoding="utf-8") as f:
-            f.write(html)
+    html_filename = "vacancies_{}_{}.html".format(date_str, time_str)
+    with open(OUTPUT_DIR / html_filename, "w", encoding="utf-8") as f:
+        f.write(html)
 
-        meta = {"date": date_str, "time": time_str, "period": search_period_days,
-                "cutoff": cutoff_dt.strftime("%Y-%m-%dT%H:%M"), "count": new_count,
-                "queries": queries_ran}
-        with open(OUTPUT_DIR / "vacancies_{}_{}.meta.json".format(date_str, time_str), "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+    # Meta
+    meta = {"date": date_str, "time": time_str, "period": search_period_days,
+            "cutoff": cutoff_dt.strftime("%Y-%m-%dT%H:%M"), "count": count,
+            "queries": queries_ran}
+    with open(OUTPUT_DIR / "vacancies_{}_{}.meta.json".format(date_str, time_str), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        report_meta = {"date": date_str, "time": time_str, "period": search_period_days,
-                       "count": new_count, "filename_html": html_filename,
-                       "filename_txt": txt_filename, "html_content": html, "txt_content": text_report}
-        history = cfg.get("reports_history", [])
-        history.append(report_meta)
-        if len(history) > 30:
-            history = history[-30:]
-        cfg["reports_history"] = history
+    # History
+    report_meta = {"date": date_str, "time": time_str, "period": search_period_days,
+                   "count": count, "filename_html": html_filename,
+                   "filename_txt": txt_filename, "html_content": html, "txt_content": text_report}
+    history = cfg.get("reports_history", [])
+    history.append(report_meta)
+    if len(history) > 30:
+        history = history[-30:]
+    cfg["reports_history"] = history
 
-        cleanup_old_reports(days=7)
+    cleanup_old_reports(days=7)
 
+    # Telegram
+    if send_tg:
         token_tg = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
         if token_tg and chat_id:
-            header = "\ud83d\udccb Новые вакансии\nПериод: {} дн. | Найдено: {}\n\n".format(search_period_days, new_count)
+            header = "\ud83d\udccb Новые вакансии\nПериод: {} дн. | Найдено: {}\n\n".format(search_period_days, count)
             messages = []
             current = header
-            for v in new_vacancies:
+            for v in vacancies:
                 block = "\u2022 {}\n  Компания: {}\n  Зарплата: {}\n  Дата: {}\n  Ссылка: {}\n\n".format(
                     _escape_tg(v.get("name", "")), _escape_tg(v.get("employer", {}).get("name", "")),
                     _escape_tg(format_salary(v)), _escape_tg(format_datetime(v.get("published_at", ""))),
@@ -484,18 +418,112 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
                 ok = send_telegram(token_tg, chat_id, msg)
                 print("[Scheduler] Telegram {}/{}: {}".format(i, len(messages), "OK" if ok else "FAIL"))
 
-        new_ids = {v.get("id") for v in new_vacancies}
-        cfg["sent_vacancies"] = sorted(sent_ids | new_ids)
-        save_config(cfg)
-        has_new = True
-        _write_last_run(start_ts, new_count, True, queries_ran, finished=True)
-        print("[Scheduler] Задача завершена.")
+    return count, html_filename, txt_filename
+
+
+def run_monitor_job(force=False):
+    """Run vacancy search.
+    force=True: manual run — report ALL vacancies (ignore sent_vacancies).
+    force=False: scheduled — report only NEW vacancies, update sent_vacancies.
+    """
+    start_ts = datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S")
+    queries_ran = []
+    error_msg = None
+    try:
+        mode = "РУЧНОЙ" if force else "авто"
+        print("[Scheduler] === {} запуск в {} ===".format(mode, start_ts))
+        cfg = load_config()
+        queries_ran = cfg.get("search_queries", [])
+        # Mark started (no finished_at)
+        _write_last_run(start_ts, 0, False, queries_ran, finished=False)
+
+        if not cfg.get("enabled", True) and not force:
+            print("[Scheduler] Мониторинг выключен, пропускаем.")
+            _write_last_run(start_ts, 0, False, queries_ran, finished=True)
+            return
+        if cfg.get("only_workdays", True) and not is_workday() and not force:
+            print("[Scheduler] Выходной, пропускаем.")
+            _write_last_run(start_ts, 0, False, queries_ran, finished=True)
+            return
+
+        today = datetime.now(TZ)
+        date_str = today.strftime("%Y-%m-%d")
+        time_str = today.strftime("%H-%M")
+        search_period_days = int(cfg.get("search_period", 1))
+        hours = PERIOD_HOURS.get(search_period_days, search_period_days * 24)
+        cutoff_dt = today - timedelta(hours=hours)
+        print("[Scheduler] Период: {} дн. ({} ч.), отсечка: {}".format(
+            search_period_days, hours, cutoff_dt.strftime("%Y-%m-%dT%H:%M")))
+
+        sent_ids = set(cfg.get("sent_vacancies", []))
+        all_vacancies = []
+        seen_ids = set()
+
+        for query in cfg.get("search_queries", []):
+            try:
+                items = fetch_vacancies(query, cfg["area_id"], search_period=search_period_days)
+                print('[Scheduler] Запрос "{}" -> {} шт.'.format(query, len(items)))
+                for item in items:
+                    try:
+                        vid = item.get("id")
+                        if not vid or vid in seen_ids:
+                            continue
+                        pub_str = item.get("published_at", "")
+                        try:
+                            dt_str = pub_str.replace("+0300", "+03:00").replace("+0200", "+02:00")
+                            pub_dt = datetime.fromisoformat(dt_str)
+                            if pub_dt.tzinfo is None:
+                                pub_dt = TZ.localize(pub_dt)
+                            if pub_dt < cutoff_dt:
+                                continue
+                        except Exception:
+                            pub_date = pub_str[:10] if pub_str else ""
+                            if pub_date and pub_date < cutoff_dt.strftime("%Y-%m-%d"):
+                                continue
+                        seen_ids.add(vid)
+                        all_vacancies.append(item)
+                    except Exception as inner_e:
+                        print("[Scheduler] Ошибка вакансии: {}".format(inner_e))
+                        continue
+            except Exception as query_e:
+                print("[Scheduler] Ошибка запроса '{}': {}".format(query, query_e))
+                continue
+
+        print("[Scheduler] Всего уникальных за период: {}".format(len(all_vacancies)))
+
+        if force:
+            # Manual: report ALL vacancies, don't update sent_vacancies
+            report_vacancies = all_vacancies
+        else:
+            # Scheduled: only new ones
+            report_vacancies = [v for v in all_vacancies if v.get("id") not in sent_ids]
+
+        count = len(report_vacancies)
+        print("[Scheduler] В отчёт: {}".format(count))
+
+        if count > 0:
+            count, html_fn, txt_fn = _build_and_save_report(
+                report_vacancies, date_str, time_str, search_period_days, cutoff_dt, queries_ran, cfg,
+                send_tg=(not force))  # Telegram only for scheduled
+            if not force:
+                new_ids = {v.get("id") for v in report_vacancies}
+                cfg["sent_vacancies"] = sorted(sent_ids | new_ids)
+            save_config(cfg)
+            _write_last_run(start_ts, count, True, queries_ran, finished=True)
+            print("[Scheduler] Задача завершена. Отчёт: {} вакансий".format(count))
+        else:
+            if not force:
+                cfg["sent_vacancies"] = sorted(sent_ids | seen_ids)
+                save_config(cfg)
+            _write_last_run(start_ts, 0, False, queries_ran, finished=True)
+            print("[Scheduler] Нет вакансий для отчёта.")
+
     except Exception as e:
         error_msg = str(e)
         print("[Scheduler] КРИТИЧЕСКАЯ ОШИБКА: {}".format(error_msg))
         import traceback
         traceback.print_exc()
-        _write_last_run(start_ts, new_count, has_new, queries_ran, finished=True, error=error_msg)
+        _write_last_run(start_ts, 0, False, queries_ran, finished=True, error=error_msg)
 
 scheduler = BackgroundScheduler(timezone=TZ)
 
@@ -508,7 +536,7 @@ def init_scheduler():
         hour, minute = map(int, time_str.split(":"))
     except Exception:
         hour, minute = 9, 0
-    scheduler.add_job(run_monitor_job, 'cron', hour=hour, minute=minute, id='vacancy_job')
+    scheduler.add_job(lambda: run_monitor_job(force=False), 'cron', hour=hour, minute=minute, id='vacancy_job')
     scheduler.start()
     print("[Scheduler] З\u0430\u043f\u0443\u0449\u0435\u043d. \u0415\u0436\u0435\u0434\u043d\u0435\u0432\u043d\u043e \u0432 {}:{}".format(hour, minute))
 
@@ -519,6 +547,6 @@ def update_schedule(new_time):
         if job:
             scheduler.reschedule_job('vacancy_job', trigger='cron', hour=h, minute=m)
         else:
-            scheduler.add_job(run_monitor_job, 'cron', hour=h, minute=m, id='vacancy_job')
+            scheduler.add_job(lambda: run_monitor_job(force=False), 'cron', hour=h, minute=m, id='vacancy_job')
     except Exception as e:
         print("[Scheduler] Ошибка переназначения: {}".format(e))
