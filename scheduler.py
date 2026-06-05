@@ -39,31 +39,32 @@ def format_datetime(published_at):
     if not published_at:
         return ""
     try:
-        dt = datetime.fromisoformat(published_at.replace("+0300", "+03:00"))
+        dt = datetime.fromisoformat(published_at.replace("+0300", "+03:00").replace("+02:00", "+02:00"))
+        # If time is 00:00:00, show only date (HH HTML doesn't provide exact time)
+        if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+            return dt.strftime("%d.%m.%Y")
         return dt.strftime("%d.%m.%Y %H:%M")
     except Exception:
-        return published_at[:16].replace("T", " ")
+        return published_at[:16].replace("T", " ") if len(published_at) > 16 else published_at.replace("T", " ")
 
 def parse_date_text(date_text):
-    if not date_text:
-        return datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S+0300")
-    date_text = date_text.lower().strip()
+    """Parse relative date text. Returns date only (00:00:00) since HH doesn't show exact time in HTML."""
     today = datetime.now(TZ)
-    if "сегодня" in date_text:
-        return today.strftime("%Y-%m-%dT%H:%M:%S+0300")
+    if not date_text:
+        return today.strftime("%Y-%m-%dT00:00:00+03:00")
+    date_text = date_text.lower().strip()
+    if "сегодня" in date_text or "час" in date_text or "минут" in date_text or "только что" in date_text:
+        return today.strftime("%Y-%m-%dT00:00:00+03:00")
     elif "вчера" in date_text:
-        return (today - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S+0300")
+        return (today - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00+03:00")
     elif "недел" in date_text:
-        return (today - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S+0300")
-    elif "час" in date_text or "минут" in date_text or "мес" in date_text:
-        # Hours/minutes/months → treat as today for cutoff purposes
-        return today.strftime("%Y-%m-%dT%H:%M:%S+0300")
+        return (today - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00+03:00")
     else:
         nums = re.findall(r'\d+', date_text)
         if nums:
             days = int(nums[0])
-            return (today - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S+0300")
-    return today.strftime("%Y-%m-%dT%H:%M:%S+0300")
+            return (today - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00+03:00")
+    return today.strftime("%Y-%m-%dT00:00:00+03:00")
 
 def parse_salary_text(text):
     """Parse salary text robustly using specific regex patterns."""
@@ -110,24 +111,33 @@ def parse_salary_text(text):
     return None
 
 def find_salary_in_card(card):
-    """Find salary in vacancy card — only in specific tags, NOT whole card."""
-    # Primary: data-qa attribute
+    """Find salary in vacancy card — try multiple selectors."""
+    # Primary: data-qa attribute (HH standard)
     sal_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-compensation"})
     if sal_tag:
-        txt = sal_tag.get_text(strip=True)
+        txt = sal_tag.get_text(strip=True, separator=' ')
         if txt:
             sal = parse_salary_text(txt)
             if sal:
                 return sal
 
-    # Secondary: specific compensation classes
-    for cls in ["compensation", "vacancy-serp-item__sidebar", "bloko-header-section-3"]:
-        for tag in card.find_all(class_=re.compile(r"{}".format(cls))):
-            txt = tag.get_text(strip=True)
-            if txt and len(txt) < 100:
+    # Secondary: any span/div containing currency symbols
+    currency_keywords = ['\u20bd', '\u0440\u0443\u0431', 'USD', 'EUR', '$', '\u20ac', 'salary', '\u0437\u043f']
+    for tag in card.find_all(["span", "div"]):
+        txt = tag.get_text(strip=True, separator=' ')
+        if txt and any(c in txt for c in currency_keywords):
+            if len(txt) < 150:  # reasonable length for salary text
                 sal = parse_salary_text(txt)
                 if sal:
                     return sal
+
+    # Tertiary: search all text for "от ... до ... ₽" pattern
+    full_text = card.get_text(separator=' ', strip=True)
+    salary_pattern = re.search(r'\u043e\u0442\s+[\d\s]+[\u20bd\u0440\u0443\u0431]|\u0434\u043e\s+[\d\s]+[\u20bd\u0440\u0443\u0431]|[\d\s]+\s*[\u20bd\u0440\u0443\u0431]', full_text)
+    if salary_pattern:
+        sal = parse_salary_text(salary_pattern.group())
+        if sal:
+            return sal
 
     return None
 
@@ -207,11 +217,25 @@ def parse_html_vacancies(html):
 
             salary = find_salary_in_card(card)
 
-            date_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-date"})
-            if not date_tag:
-                date_tag = card.find("span", class_=re.compile(r"date"))
-            date_text = date_tag.get_text(strip=True, separator=' ') if date_tag else None
-            published = parse_date_text(date_text)
+            # Try to get exact publish date from <time datetime="...">
+            published = None
+            time_tag = card.find("time")
+            if time_tag and time_tag.get("datetime"):
+                try:
+                    dt_val = time_tag["datetime"]
+                    # Validate it's a proper ISO date
+                    datetime.fromisoformat(dt_val.replace("+0300", "+03:00"))
+                    published = dt_val
+                except (ValueError, TypeError):
+                    published = None
+
+            # Fallback: text-based relative date
+            if not published:
+                date_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-date"})
+                if not date_tag:
+                    date_tag = card.find("span", class_=re.compile(r"date"))
+                date_text = date_tag.get_text(strip=True, separator=' ') if date_tag else None
+                published = parse_date_text(date_text)
 
             vacancies.append({
                 "id": vid, "name": title, "employer": {"name": employer},
