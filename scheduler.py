@@ -242,9 +242,8 @@ def _write_last_run(start_ts, new_count, has_new, queries, finished=True, error=
             last_run["finished_at"] = datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S")
         if error:
             last_run["error"] = str(error)
-        json_bytes = json.dumps(last_run, ensure_ascii=False).encode("utf-8", errors="replace")
-        with open(OUTPUT_DIR / "last_run.json", "wb") as f:
-            f.write(json_bytes)
+        with open(OUTPUT_DIR / "last_run.json", "w", encoding="utf-8") as f:
+            json.dump(last_run, f, ensure_ascii=True)
     except Exception as e:
         print("[Scheduler] Ошибка записи last_run: {}".format(e))
 
@@ -312,7 +311,7 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
             "cutoff": cutoff_dt.strftime("%Y-%m-%dT%H:%M"), "count": count,
             "queries": queries_ran}
     with open(OUTPUT_DIR / "vacancies_{}_{}.meta.json".format(date_str, time_str), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
+        json.dump(meta, f, ensure_ascii=True, indent=2)
 
     report_meta = {"date": date_str, "time": time_str, "period": search_period_days,
                    "count": count, "filename_html": html_filename,

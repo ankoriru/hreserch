@@ -67,7 +67,7 @@ def save_config(cfg):
         # Ensure parent directory exists
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            json.dump(cfg, f, ensure_ascii=True, indent=2)
         print("[Config] \u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e \u0432 {}".format(CONFIG_FILE.absolute()))
     except Exception as e:
         print("[Config] \u041e\u0448\u0438\u0431\u043a\u0430 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u044f: {}".format(e))
