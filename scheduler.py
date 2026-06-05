@@ -242,8 +242,9 @@ def _write_last_run(start_ts, new_count, has_new, queries, finished=True, error=
             last_run["finished_at"] = datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S")
         if error:
             last_run["error"] = str(error)
-        with open(OUTPUT_DIR / "last_run.json", "w", encoding="utf-8") as f:
-            json.dump(last_run, f, ensure_ascii=False)
+        json_bytes = json.dumps(last_run, ensure_ascii=False).encode("utf-8", errors="replace")
+        with open(OUTPUT_DIR / "last_run.json", "wb") as f:
+            f.write(json_bytes)
     except Exception as e:
         print("[Scheduler] Ошибка записи last_run: {}".format(e))
 
