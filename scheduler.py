@@ -181,6 +181,26 @@ def parse_html_vacancies(html):
             continue
     return vacancies
 
+def _get_html_opener():
+    """Create urllib opener with cookie jar for session persistence."""
+    cookie_jar = urllib.request.HTTPCookieProcessor()
+    opener = urllib.request.build_opener(cookie_jar)
+    return opener
+
+def _fetch_hh_session(opener):
+    """Get initial session cookies from hh.ru homepage."""
+    try:
+        req = urllib.request.Request("https://hh.ru/", headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        })
+        with opener.open(req, timeout=15) as resp:
+            return resp.read().decode("utf-8")
+    except Exception as e:
+        print("[Session] Не удалось получить сессию: {}".format(e))
+        return None
+
 def fetch_vacancies_html(query, area_id, search_period=1):
     url = "https://hh.ru/search/vacancy"
     params = {
@@ -192,18 +212,41 @@ def fetch_vacancies_html(query, area_id, search_period=1):
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
     print("[HTML URL] {}".format(full_url))
+    
+    # Use cookie jar for session
+    opener = _get_html_opener()
+    
+    # First, get session cookies
+    _fetch_hh_session(opener)
+    
+    # Now search with cookies
     req = urllib.request.Request(full_url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html",
-        "Accept-Language": "ru-RU,ru;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
         "Referer": "https://hh.ru/",
     })
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with opener.open(req, timeout=30) as resp:
             html = resp.read().decode("utf-8")
+            # Check for captcha/block
+            if 'HHCaptcha' in html or 'captcha' in html.lower():
+                print("[HTML Warning] CAPTCHA detected, trying without cookies...")
+                # Fallback: try without session
+                req2 = urllib.request.Request(full_url, headers={
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "text/html",
+                    "Accept-Language": "ru-RU,ru;q=0.9",
+                    "Referer": "https://hh.ru/",
+                })
+                with urllib.request.urlopen(req2, timeout=30) as resp2:
+                    html = resp2.read().decode("utf-8")
             items = parse_html_vacancies(html)
-            print("[HTML] Получено {}, после фильтра: {}".format(len(items), len(items)))
+            print("[HTML] Получено {} вакансий".format(len(items)))
             return items
+    except urllib.error.HTTPError as e:
+        print("[HTML HTTPError] {}: {}".format(query, e.code))
+        return []
     except Exception as e:
         print("[HTML Error] {}: {}".format(query, e))
         return []
