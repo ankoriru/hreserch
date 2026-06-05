@@ -44,8 +44,7 @@ function updateTable(data) {
 function setButton(enabled) {
     const btn = document.getElementById('run-now-btn');
     if (!btn) return;
-    btn.disabled = !enabled;
-    btn.textContent = enabled ? '\u25b6 \u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u0441\u0435\u0439\u0447\u0430\u0441' : '\u23f3 \u0412\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f...';
+    btn.style.display = enabled ? '' : 'none';
 }
 
 function showStatus(html, autoHideMs) {
