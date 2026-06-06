@@ -9,6 +9,7 @@ import time
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
+from http.cookiejar import CookieJar
 from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import timezone
@@ -182,7 +183,80 @@ def _next_ua():
 def _is_captcha(html):
     return 'HHCaptcha' in html or 'captcha' in html.lower() or 'g-recaptcha' in html
 
+def _ua_headers():
+    return {
+        "User-Agent": _next_ua(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.5,en;q=0.3",
+        "Accept-Encoding": "gzip, deflate",
+        "Referer": "https://hh.ru/",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "max-age=0",
+    }
+
+def _fetch_html(url, cookiejar=None, timeout=30):
+    """Fetch HTML with optional cookie jar. Returns (html, cookiejar)."""
+    req = urllib.request.Request(url, headers=_ua_headers())
+    handlers = []
+    if cookiejar is not None:
+        handlers.append(urllib.request.HTTPCookieProcessor(cookiejar))
+    opener = urllib.request.build_opener(*handlers)
+    with opener.open(req, timeout=timeout) as resp:
+        data = resp.read()
+        if resp.headers.get('Content-Encoding') == 'gzip':
+            data = gzip.decompress(data)
+        return data.decode("utf-8", errors="replace"), cookiejar
+
 def fetch_vacancies_html(query, area_id, search_period=1):
+    """Fetch vacancies: 1) Public API first, 2) HTML with cookies fallback, 3) Mobile fallback."""
+
+    # ========== STRATEGY 1: Public API (no auth required) ==========
+    try:
+        time.sleep(random.uniform(1.0, 2.5))
+        api_params = {
+            "text": query,
+            "area": area_id,
+            "per_page": 100,
+            "page": 0,
+            "order_by": "publication_time",
+        }
+        api_url = "https://api.hh.ru/vacancies?{}".format(urllib.parse.urlencode(api_params))
+        print("[API URL] {}".format(api_url))
+        req = urllib.request.Request(api_url, headers={
+            "User-Agent": _next_ua(),
+            "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            items = data.get("items", [])
+            vacancies = []
+            for item in items:
+                if not item or not item.get("id"):
+                    continue
+                salary = item.get("salary")
+                vac = {
+                    "id": str(item["id"]),
+                    "name": item.get("name", ""),
+                    "employer": {"name": (item.get("employer") or {}).get("name", "\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439")},
+                    "salary": {"from": salary.get("from"), "to": salary.get("to"), "currency": salary.get("currency", "RUR")} if salary else None,
+                    "published_at": item.get("published_at", ""),
+                    "alternate_url": item.get("alternate_url", ""),
+                }
+                # Shorten URL
+                vid = str(item["id"])
+                vac["alternate_url"] = "https://hh.ru/vacancy/{}".format(vid)
+                vacancies.append(vac)
+            print("[API] {} \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0439 \u0434\u043b\u044f '{}'".format(len(vacancies), query))
+            if vacancies:
+                return vacancies
+    except urllib.error.HTTPError as e:
+        print("[API] HTTP {} \u0434\u043b\u044f '{}'".format(e.code, query))
+    except Exception as e:
+        print("[API] \u041e\u0448\u0438\u0431\u043a\u0430 '{}': {}".format(query, e))
+
+    # ========== STRATEGY 2: HTML scraping with cookies ==========
     url = "https://hh.ru/search/vacancy"
     params = {
         "text": query,
@@ -190,61 +264,54 @@ def fetch_vacancies_html(query, area_id, search_period=1):
         "order_by": "publication_time",
         "search_period": search_period,
         "items_on_page": 100,
-        "page": 0,
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
     print("[HTML URL] {}".format(full_url))
 
-    # Try up to 3 different UAs if CAPTCHA keeps appearing
-    for attempt in range(1, 4):
-        try:
-            time.sleep(random.uniform(1.5, 3.5))  # human-like delay before request
-            req = urllib.request.Request(full_url, headers={
-                "User-Agent": _next_ua(),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.5,en;q=0.3",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Referer": "https://hh.ru/",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-User": "?1",
-                "Cache-Control": "max-age=0",
-            })
-            # urllib doesn't auto-decode gzip, so add handler
-            opener = urllib.request.build_opener()
-            with opener.open(req, timeout=30) as resp:
-                html = resp.read()
-                # Handle gzip
-                if resp.headers.get('Content-Encoding') == 'gzip':
-                    html = gzip.decompress(html)
-                html = html.decode("utf-8", errors="replace")
-
-            if _is_captcha(html):
-                print("[HTML] CAPTCHA detected (attempt {}/{}), retrying with different UA...".format(attempt, 3))
-                time.sleep(random.uniform(2.0, 4.0))
-                continue  # try next UA
-
+    # First visit homepage to get cookies
+    try:
+        cj = http_cookiejar()
+        time.sleep(random.uniform(1.0, 2.0))
+        _, cj = _fetch_html("https://hh.ru/", cookiejar=cj)
+        time.sleep(random.uniform(1.5, 3.0))
+        html, _ = _fetch_html(full_url, cookiejar=cj)
+        if not _is_captcha(html):
             items = parse_html_vacancies(html)
-            print("[HTML] Получено {} вакансий (attempt {})".format(len(items), attempt))
+            print("[HTML+cookies] {} \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0439 \u0434\u043b\u044f '{}'".format(len(items), query))
+            if items:
+                return items
+        else:
+            print("[HTML+cookies] CAPTCHA for '{}'".format(query))
+    except Exception as e:
+        print("[HTML+cookies] Error '{}': {}".format(query, e))
+
+    # ========== STRATEGY 3: Mobile version ==========
+    try:
+        time.sleep(random.uniform(2.0, 4.0))
+        mobile_url = "https://m.hh.ru/search/vacancy?{}".format(urllib.parse.urlencode(params))
+        print("[Mobile URL] {}".format(mobile_url))
+        req = urllib.request.Request(mobile_url, headers=_ua_headers())
+        opener = urllib.request.build_opener()
+        with opener.open(req, timeout=30) as resp:
+            data = resp.read()
+            if resp.headers.get('Content-Encoding') == 'gzip':
+                data = gzip.decompress(data)
+            html = data.decode("utf-8", errors="replace")
+        if not _is_captcha(html):
+            items = parse_html_vacancies(html)
+            print("[Mobile] {} \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0439 \u0434\u043b\u044f '{}'".format(len(items), query))
             return items
-        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-            print("[HTML Connection Error] {} (attempt {}/{}): {}".format(query, attempt, 3, e))
-            if attempt < 3:
-                time.sleep(random.uniform(2.0, 4.0))
-            else:
-                return []
-        except Exception as e:
-            print("[HTML Error] {} (attempt {}/{}): {}".format(query, attempt, 3, e))
-            if attempt < 3:
-                time.sleep(random.uniform(2.0, 4.0))
-            else:
-                return []
-    print("[HTML] All attempts failed for '{}', returning empty".format(query))
+        else:
+            print("[Mobile] CAPTCHA for '{}'".format(query))
+    except Exception as e:
+        print("[Mobile] Error '{}': {}".format(query, e))
+
+    print("[ALL] \u0412\u0441\u0435 \u0441\u0442\u0440\u0430\u0442\u0435\u0433\u0438\u0438 \u043d\u0435 \u0441\u0440\u0430\u0431\u043e\u0442\u0430\u043b\u0438 \u0434\u043b\u044f '{}'".format(query))
     return []
+
+# Cookie jar factory for session handling
+def http_cookiejar():
+    return CookieJar()
 
 def parse_html_vacancies(html):
     soup = BeautifulSoup(html, "html.parser")
