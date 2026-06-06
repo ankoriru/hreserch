@@ -282,7 +282,7 @@ def send_telegram(token, chat_id, message, retries=3):
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:500]
             print("[Telegram] HTTP {} ERROR: {}".format(e.code, body))
-            if e.code == 400 and "can\'t parse entities" in body:
+            if e.code == 400 and "can't parse entities" in body:
                 # HTML parse error — fallback to plain text
                 print("[Telegram] HTML parse error, trying plain text...")
                 import re as _re
@@ -296,7 +296,7 @@ def send_telegram(token, chat_id, message, retries=3):
                         return resp2.status == 200
                 except Exception as e2:
                     print("[Telegram] Plain text error: {}".format(e2))
-            if 400 <= e.code < 500:
+            elif 400 <= e.code < 500:
                 return False
         except Exception as e:
             print("[Telegram] Attempt {}/{} error: {}".format(attempt, retries, e))
@@ -428,7 +428,7 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
         token_tg = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
         if token_tg and chat_id:
-            header = "[+] Новые вакансии\nПериод: {} дн. | Найдено: {}\n\n".format(search_period, count)
+            header = "<b>[+] Новые вакансии</b><br>Период: {} дн. | Найдено: {}<br><br>".format(search_period, count)
             messages = []
             current = header
             for v in vacancies:
