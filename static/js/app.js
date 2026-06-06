@@ -59,50 +59,54 @@ function showStatus(html, autoHideMs) {
 
 function stopAll(statusHtml, autoHideMs) {
     if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
-    setButton(true);
-    showStatus(statusHtml, autoHideMs);
+    // Final table refresh before showing status
+    fetch('/api/reports')
+        .then(r => r.json())
+        .then(data => { updateTable(data); })
+        .catch(() => {})
+        .finally(() => {
+            setButton(true);
+            showStatus(statusHtml, autoHideMs);
+        });
 }
 
 function doPoll() {
     _pollCount++;
-
-    // Always refresh table
-    fetch('/api/reports')
-        .then(r => r.json())
-        .then(data => updateTable(data))
-        .catch(() => {});
-
-    // Check if job finished
-    fetch('/api/last_run')
-        .then(r => r.json())
-        .then(lr => {
-            // Job must have finished_at AND start_ts >= our run click time
-            if (lr.start_ts >= _runStartTime && lr.finished_at) {
-                if (lr.error) {
-                    stopAll('<span class="text-danger fw-bold">\u274c Ошибка: ' + String(lr.error).substring(0, 80) + '</span>', 8000);
-                } else if (lr.has_new) {
-                    stopAll('<span class="text-success fw-bold">\u2705 \u041e\u0442\u0447\u0451\u0442 \u0441\u0444\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d</span>', 5000);
-                } else {
-                    stopAll('<span class="text-info fw-bold">\u2139\ufe0f \u041d\u043e\u0432\u044b\u0445 \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0439 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</span>', 5000);
-                }
-                return;
+    
+    // Fetch reports AND last_run in parallel, wait for both
+    Promise.all([
+        fetch('/api/reports').then(r => r.json()).catch(() => []),
+        fetch('/api/last_run').then(r => r.json()).catch(() => ({}))
+    ]).then(([reports, lr]) => {
+        // Update table first
+        updateTable(reports);
+        
+        // Check if our job finished
+        if (lr.start_ts && lr.start_ts >= _runStartTime && lr.finished_at) {
+            if (lr.error) {
+                stopAll('<span class="text-danger fw-bold">\u274c Ошибка: ' + String(lr.error).substring(0, 80) + '</span>', 8000);
+            } else if (lr.has_new) {
+                stopAll('<span class="text-success fw-bold">\u2705 Отчёт сформирован</span>', 5000);
+            } else {
+                stopAll('<span class="text-info fw-bold">\u2139\ufe0f Новых вакансий не найдено</span>', 5000);
             }
-            // No finished_at yet — job still running
-            if (_pollCount >= MAX_POLLS) {
-                stopAll('<span class="text-muted">\u23f0 \u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u0437\u0430\u043d\u044f\u043b\u0430 \u0441\u043b\u0438\u0448\u043a\u043e\u043c \u0434\u043e\u043b\u0433\u043e, \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u043e\u0437\u0436\u0435</span>', 8000);
-            }
-        })
-        .catch(() => {
-            if (_pollCount >= MAX_POLLS) {
-                stopAll('<span class="text-muted">\u23f0 \u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e</span>', 3000);
-            }
-        });
+            return;
+        }
+        // Max polls reached
+        if (_pollCount >= MAX_POLLS) {
+            stopAll('<span class="text-muted">\u23f0 Проверка заняла слишком долго, попробуйте позже</span>', 8000);
+        }
+    }).catch(() => {
+        if (_pollCount >= MAX_POLLS) {
+            stopAll('<span class="text-muted">\u23f0 Завершено</span>', 3000);
+        }
+    });
 }
 
-function startPolling() {
+function startPolling(serverStartTs) {
     if (_pollInterval) clearInterval(_pollInterval);
     _pollCount = 0;
-    _runStartTime = new Date().toISOString().slice(0, 19);
+    _runStartTime = serverStartTs;
     doPoll();
     _pollInterval = setInterval(doPoll, 3000);
 }
@@ -113,7 +117,10 @@ function runNow() {
     showStatus('<span class="spinner-border spinner-border-sm"></span> \u0412\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f...', 0);
     fetch('/api/run', { method: 'POST' })
         .then(r => r.json())
-        .then(() => startPolling())
+        .then(data => {
+            const serverTs = data.start_ts || new Date().toISOString().slice(0, 19);
+            startPolling(serverTs);
+        })
         .catch(e => { alert('\u041e\u0448\u0438\u0431\u043a\u0430: ' + e); stopAll(null, 0); });
 }
 
