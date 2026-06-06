@@ -1,6 +1,8 @@
+import gzip
 import html as html_module
 import json
 import os
+import random
 import re
 import socket
 import time
@@ -20,6 +22,17 @@ TZ = timezone("Europe/Moscow")
 
 # Hour-based cutoffs per period
 PERIOD_HOURS = {1: 24, 3: 72, 7: 168, 30: 720}
+
+# Rotate User-Agent to reduce CAPTCHA triggers
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
+]
+_ua_index = [0]  # mutable int for closure
 
 def is_workday():
     today = datetime.now(TZ).weekday()
@@ -161,6 +174,14 @@ def parse_date_text(date_text):
             return (today - timedelta(days=int(nums[0]))).strftime("%Y-%m-%dT23:59:59+03:00")
     return today.strftime("%Y-%m-%dT23:59:59+03:00")
 
+def _next_ua():
+    ua = USER_AGENTS[_ua_index[0] % len(USER_AGENTS)]
+    _ua_index[0] += 1
+    return ua
+
+def _is_captcha(html):
+    return 'HHCaptcha' in html or 'captcha' in html.lower() or 'g-recaptcha' in html
+
 def fetch_vacancies_html(query, area_id, search_period=1):
     url = "https://hh.ru/search/vacancy"
     params = {
@@ -169,27 +190,61 @@ def fetch_vacancies_html(query, area_id, search_period=1):
         "order_by": "publication_time",
         "search_period": search_period,
         "items_on_page": 100,
+        "page": 0,
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
     print("[HTML URL] {}".format(full_url))
-    req = urllib.request.Request(full_url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html",
-        "Accept-Language": "ru-RU,ru;q=0.9",
-        "Referer": "https://hh.ru/",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            html = resp.read().decode("utf-8")
+
+    # Try up to 3 different UAs if CAPTCHA keeps appearing
+    for attempt in range(1, 4):
+        try:
+            time.sleep(random.uniform(1.5, 3.5))  # human-like delay before request
+            req = urllib.request.Request(full_url, headers={
+                "User-Agent": _next_ua(),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.5,en;q=0.3",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Referer": "https://hh.ru/",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0",
+            })
+            # urllib doesn't auto-decode gzip, so add handler
+            opener = urllib.request.build_opener()
+            with opener.open(req, timeout=30) as resp:
+                html = resp.read()
+                # Handle gzip
+                if resp.headers.get('Content-Encoding') == 'gzip':
+                    html = gzip.decompress(html)
+                html = html.decode("utf-8", errors="replace")
+
+            if _is_captcha(html):
+                print("[HTML] CAPTCHA detected (attempt {}/{}), retrying with different UA...".format(attempt, 3))
+                time.sleep(random.uniform(2.0, 4.0))
+                continue  # try next UA
+
             items = parse_html_vacancies(html)
-            print("[HTML] Получено {} вакансий".format(len(items)))
+            print("[HTML] Получено {} вакансий (attempt {})".format(len(items), attempt))
             return items
-    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-        print("[HTML Connection Error] {}: {}".format(query, e))
-        return []
-    except Exception as e:
-        print("[HTML Error] {}: {}".format(query, e))
-        return []
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+            print("[HTML Connection Error] {} (attempt {}/{}): {}".format(query, attempt, 3, e))
+            if attempt < 3:
+                time.sleep(random.uniform(2.0, 4.0))
+            else:
+                return []
+        except Exception as e:
+            print("[HTML Error] {} (attempt {}/{}): {}".format(query, attempt, 3, e))
+            if attempt < 3:
+                time.sleep(random.uniform(2.0, 4.0))
+            else:
+                return []
+    print("[HTML] All attempts failed for '{}', returning empty".format(query))
+    return []
 
 def parse_html_vacancies(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -530,7 +585,9 @@ def run_monitor_job(force=False):
         all_vacancies = []
         seen_ids = set()
 
-        for query in cfg.get("search_queries", []):
+        for idx, query in enumerate(cfg.get("search_queries", [])):
+            if idx > 0:
+                time.sleep(random.uniform(3.0, 6.0))  # pause between queries to reduce rate-limit risk
             try:
                 items = fetch_vacancies_html(query, cfg["area_id"], search_period=search_period_days)
                 passed_cutoff = 0
