@@ -145,9 +145,8 @@ def fetch_vacancies_html(query, area_id, search_period=1):
         with urllib.request.urlopen(req, timeout=30) as resp:
             html = resp.read().decode("utf-8")
             items = parse_html_vacancies(html)
-            filtered = [item for item in items if matches_query(item.get("name", ""), query)]
-            print("[HTML] Получено {}, после фильтра: {}".format(len(items), len(filtered)))
-            return filtered
+            print("[HTML] Получено {} вакансий".format(len(items)))
+            return items
     except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
         print("[HTML Connection Error] {}: {}".format(query, e))
         return []
