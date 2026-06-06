@@ -168,7 +168,7 @@ def fetch_vacancies_html(query, area_id, search_period=1):
         "area": area_id,
         "order_by": "publication_time",
         "search_period": search_period,
-        "items_on_page": 20,
+        "items_on_page": 100,
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
     print("[HTML URL] {}".format(full_url))
@@ -422,7 +422,7 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
 </head>
 <body>
 <div class="back"><a href="/dashboard">\u2190 \u041d\u0430\u0437\u0430\u0434</a></div>
-<h1>[+] Новые вакансии </h1>
+<h1>[+] Новые вакансии</h1>
 <p>\u041f\u0435\u0440\u0438\u043e\u0434: <strong>{} \u0434\u043d.</strong> | \u041d\u0430\u0439\u0434\u0435\u043d\u043e: <strong>{}</strong></p>
 {}
 <p class="meta">\u0421\u0444\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u043e {}</p>
@@ -512,7 +512,7 @@ def run_monitor_job(force=False):
         for query in cfg.get("search_queries", []):
             try:
                 items = fetch_vacancies_html(query, cfg["area_id"], search_period=search_period_days)
-                print('[Scheduler] \u0417\u0430\u043f\u0440\u043e\u0441 "{}" -> {} \u0448\u0442.'.format(query, len(items)))
+                passed_cutoff = 0
                 for item in items:
                     try:
                         vid = item.get("id")
@@ -530,20 +530,26 @@ def run_monitor_job(force=False):
                             pub_date = pub_str[:10] if pub_str else ""
                             if pub_date and pub_date < cutoff_dt.strftime("%Y-%m-%d"):
                                 continue
+                        passed_cutoff += 1
                         seen_ids.add(vid)
                         all_vacancies.append(item)
                     except Exception as inner_e:
                         print("[Scheduler] \u041e\u0448\u0438\u0431\u043a\u0430 \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0438: {}".format(inner_e))
                         continue
+                print("[Scheduler] Запрос '{}' -> {} шт., прошло отсечку: {}".format(query, len(items), passed_cutoff))
             except Exception as query_e:
                 print("[Scheduler] \u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u043f\u0440\u043e\u0441\u0430 '{}': {}".format(query, query_e))
                 continue
 
-        print("[Scheduler] \u0412\u0441\u0435\u0433\u043e \u0443\u043d\u0438\u043a\u0430\u043b\u044c\u043d\u044b\u0445: {}".format(len(all_vacancies)))
+        print("[Scheduler] Всего уникальных: {}".format(len(all_vacancies)))
+        # Show first 5 vacancies before query filter
+        for v in all_vacancies[:5]:
+            print("[Scheduler]   > {} | pub={}".format(v.get("name", "")[:60], v.get("published_at", "")[:16]))
 
         # Post-filter: keep only vacancies matching at least one search query
+        before_qf = len(all_vacancies)
         all_vacancies = [v for v in all_vacancies if matches_any_query(v.get("name", ""), queries_ran)]
-        print("[Scheduler] После фильтра запросов: {}".format(len(all_vacancies)))
+        print("[Scheduler] После фильтра запросов: {} (отброшено {})".format(len(all_vacancies), before_qf - len(all_vacancies)))
 
         if force:
             report_vacancies = all_vacancies
