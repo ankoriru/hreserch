@@ -195,14 +195,35 @@ def parse_html_vacancies(html):
     soup = BeautifulSoup(html, "html.parser")
     vacancies = []
     
-    # Strategy: find all vacancy links by data-qa, then search salary/date in parent wrapper
+    # Strategy: find all vacancy links with multiple fallback selectors
     vacancy_links = soup.find_all("a", attrs={"data-qa": "serp-item__title"})
     if not vacancy_links:
         vacancy_links = soup.find_all("a", attrs={"data-qa": "vacancy-serp__vacancy-title"})
     if not vacancy_links:
+        # Try magritte class (new HH UI)
+        magritte_links = soup.find_all("a", class_=re.compile(r"magritte"), href=re.compile(r"/vacancy/\d+"))
+        vacancy_links = magritte_links
+    if not vacancy_links:
         vacancy_links = soup.find_all("a", href=re.compile(r"/vacancy/\d+"))
     
     print("[HTML Parser] Найдено {} ссылок".format(len(vacancy_links)))
+    
+    # Debug: if zero links, check what's in HTML
+    if len(vacancy_links) == 0:
+        # Check for captcha
+        if 'HHCaptcha' in html or 'captcha' in html.lower():
+            print("[HTML Parser] HH CAPTCHA detected!")
+        # Check for no results
+        if 'не найден' in html.lower() or 'not found' in html.lower():
+            print("[HTML Parser] No results page")
+        # Show first 200 chars of HTML
+        print("[HTML Parser] HTML preview: {}".format(html[:300].replace('\n', ' ')))
+        # Check all data-qa attributes
+        all_qa = set()
+        for tag in soup.find_all(attrs={"data-qa": True}):
+            all_qa.add(tag["data-qa"])
+        qa_with_title = [qa for qa in all_qa if 'title' in qa.lower() or 'vacancy' in qa.lower()]
+        print("[HTML Parser] data-qa with 'title'/'vacancy': {}".format(qa_with_title[:10]))
     
     for link_tag in vacancy_links:
         try:
