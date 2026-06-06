@@ -228,8 +228,11 @@ def api_last_run():
 @login_required
 def api_run():
     try:
+        from datetime import datetime
+        from pytz import timezone
+        start_ts = datetime.now(timezone("Europe/Moscow")).strftime("%Y-%m-%dT%H:%M:%S")
         threading.Thread(target=lambda: run_monitor_job(force=True), daemon=True).start()
-        return jsonify({"status": "ok", "message": "Задача запущена в фоне"})
+        return jsonify({"status": "ok", "start_ts": start_ts})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 

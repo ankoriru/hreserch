@@ -157,38 +157,66 @@ def fetch_vacancies_html(query, area_id, search_period=1):
 def parse_html_vacancies(html):
     soup = BeautifulSoup(html, "html.parser")
     vacancies = []
-    cards = soup.find_all("div", attrs={"data-qa": "vacancy-serp__vacancy"})
-    if not cards:
-        cards = soup.find_all("div", class_=re.compile(r"vacancy-serp-item"))
-    if not cards:
-        cards = soup.find_all("div", class_=re.compile(r"serp-item"))
-    print("[HTML Parser] Найдено {} карточек".format(len(cards)))
-    for card in cards:
+    
+    # Strategy: find all vacancy links by data-qa, then search salary/date in parent wrapper
+    vacancy_links = soup.find_all("a", attrs={"data-qa": "serp-item__title"})
+    if not vacancy_links:
+        vacancy_links = soup.find_all("a", attrs={"data-qa": "vacancy-serp__vacancy-title"})
+    if not vacancy_links:
+        vacancy_links = soup.find_all("a", href=re.compile(r"/vacancy/\d+"))
+    
+    print("[HTML Parser] Найдено {} ссылок".format(len(vacancy_links)))
+    
+    for link_tag in vacancy_links:
         try:
-            link_tag = card.find("a", attrs={"data-qa": "vacancy-serp__vacancy-title"})
-            if not link_tag:
-                link_tag = card.find("a", href=re.compile(r"/vacancy/\d+"))
-            if not link_tag:
-                continue
             href = link_tag.get("href", "")
-            id_match = re.search(r'/vacancy/(\d+)', href)
+            id_match = re.search(r'vacancy/(\d+)', href)
             if not id_match:
                 continue
             vid = id_match.group(1)
             title = link_tag.get_text(strip=True, separator=' ')
-            # Short clean URL
             url = "https://hh.ru/vacancy/{}".format(vid)
-
-            emp_tag = card.find("a", attrs={"data-qa": "vacancy-serp__vacancy-employer"})
+            
+            # Find wrapper — parent container with all vacancy info
+            wrapper = link_tag
+            for _ in range(5):
+                if wrapper.parent:
+                    wrapper = wrapper.parent
+                else:
+                    break
+            
+            wrapper_text = wrapper.get_text(separator='\n', strip=True)
+            wrapper_lines = [l.strip() for l in wrapper_text.split('\n') if l.strip()]
+            
+            # Employer
+            emp_tag = wrapper.find("a", attrs={"data-qa": "vacancy-serp__vacancy-employer"})
             if not emp_tag:
-                emp_tag = card.find("div", class_=re.compile(r"employer"))
+                emp_tag = wrapper.find("span", attrs={"data-qa": "vacancy-serp__vacancy-employer-text"})
+            if not emp_tag:
+                # Try finding employer name in text lines (usually right after title)
+                emp_candidates = wrapper.find_all("a", href=re.compile(r"employer|company"))
+                for cand in emp_candidates:
+                    txt = cand.get_text(strip=True)
+                    if txt and len(txt) < 50 and txt != title:
+                        emp_tag = cand
+                        break
             employer = emp_tag.get_text(strip=True, separator=' ') if emp_tag else "\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439"
-
-            salary = find_salary_in_card(card)
-
-            # Try <time datetime> first
+            
+            # Salary: search wrapper text for numbers + currency
+            salary = None
+            for line in wrapper_lines:
+                has_num = bool(re.search(r'\d[\d\s]*', line))
+                has_currency = any(c in line for c in ['\u20bd', '\u0440\u0443\u0431', 'USD', 'EUR', '$', '\u20ac'])
+                if has_num and has_currency and len(line) < 80:
+                    salary = parse_salary_text(line)
+                    if salary:
+                        break
+            if not salary:
+                salary = find_salary_in_card(wrapper)
+            
+            # Date
             published = None
-            time_tag = card.find("time")
+            time_tag = wrapper.find("time")
             if time_tag and time_tag.get("datetime"):
                 try:
                     dt_val = time_tag["datetime"]
@@ -196,20 +224,21 @@ def parse_html_vacancies(html):
                     published = dt_val
                 except (ValueError, TypeError):
                     pass
-            # Fallback: relative text date
             if not published:
-                date_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-date"})
-                if not date_tag:
-                    date_tag = card.find("span", class_=re.compile(r"date"))
-                date_text = date_tag.get_text(strip=True, separator=' ') if date_tag else None
-                published = parse_date_text(date_text)
-
+                for line in wrapper_lines:
+                    if re.search(r'(\u0441\u0435\u0433\u043e\u0434\u043d\u044f|\u0432\u0447\u0435\u0440\u0430|\d+\s+(\u0434\u0435\u043d\u044c|\u0434\u043d\u044f|\u0434\u043d\u0435\u0439)\s+\u043d\u0430\u0437\u0430\u0434)', line.lower()):
+                        if len(line) < 50:
+                            published = parse_date_text(line)
+                            break
+            if not published:
+                published = parse_date_text(None)
+            
             vacancies.append({
                 "id": vid, "name": title, "employer": {"name": employer},
                 "salary": salary, "published_at": published, "alternate_url": url,
             })
         except Exception as e:
-            print("[HTML Parser] Ошибка карточки: {}".format(e))
+            print("[HTML Parser] Ошибка: {}".format(e))
             continue
     return vacancies
 
@@ -220,6 +249,7 @@ def _escape_tg(text):
 
 def send_telegram(token, chat_id, message, retries=3):
     if not token or not chat_id:
+        print("[Telegram] SKIP: token={} chat={}".format(bool(token), bool(chat_id)))
         return False
     tg_url = "https://api.telegram.org/bot{}/sendMessage".format(token)
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
@@ -228,13 +258,18 @@ def send_telegram(token, chat_id, message, retries=3):
     for attempt in range(1, retries + 1):
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
+                print("[Telegram] HTTP {} OK".format(resp.status))
                 return resp.status == 200
         except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")[:500]
+            print("[Telegram] HTTP {} ERROR: {}".format(e.code, body))
             if 400 <= e.code < 500:
                 return False
-        except Exception:
+        except Exception as e:
+            print("[Telegram] Attempt {}/{} error: {}".format(attempt, retries, e))
             if attempt < retries:
                 time.sleep(5)
+    print("[Telegram] All {} retries failed".format(retries))
     return False
 
 def cleanup_old_reports(days=7):
@@ -364,7 +399,7 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
             messages = []
             current = header
             for v in vacancies:
-                block = "\u2022 {}\n  \u041a\u043e\u043c\u043f\u0430\u043d\u0438\u044f: {}\n  \u0417\u0430\u0440\u043f\u043b\u0430\u0442\u0430: {}\n  \u0414\u0430\u0442\u0430: {}\n  \u0421\u0441\u044b\u043b\u043a\u0430: {}\n\n".format(
+                block = "\u2022 {}<br>\u041a\u043e\u043c\u043f\u0430\u043d\u0438\u044f: {}<br>\u0417\u0430\u0440\u043f\u043b\u0430\u0442\u0430: {}<br>\u0414\u0430\u0442\u0430: {}<br>\u0421\u0441\u044b\u043b\u043a\u0430: {}<br><br>".format(
                     _escape_tg(v.get("name", "")), _escape_tg(v.get("employer", {}).get("name", "")),
                     _escape_tg(format_salary(v)), _escape_tg(format_datetime(v.get("published_at", ""))),
                     _escape_tg(v.get("alternate_url", "")))
