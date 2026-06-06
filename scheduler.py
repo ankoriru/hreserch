@@ -52,6 +52,10 @@ def parse_salary_text(text):
     if not text:
         return None
     text = text.replace('\xa0', ' ').replace('\u202f', ' ').replace('\u2011', ' ')
+    # Skip experience text like "Опыт 1-3 года", "От 3 до 6 лет"
+    lower = text.lower()
+    if any(word in lower for word in ['\u043e\u043f\u044b\u0442', '\u0433\u043e\u0434', '\u043b\u0435\u0442', 'experience']):
+        return None
     currency = "RUR"
     if 'USD' in text or '$' in text:
         currency = "USD"
@@ -208,9 +212,16 @@ def parse_html_vacancies(html):
             employer = emp_tag.get_text(strip=True, separator=' ') if emp_tag else "\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439"
             
             # Salary: search each span/div for numbers + currency
+            # Skip tags with experience info (class or text contains "experience")
             salary = None
             for tag in wrapper.find_all(["span", "div"]):
                 txt = tag.get_text(strip=True, separator=' ')
+                cls = ' '.join(tag.get("class", [])).lower()
+                if any(w in cls for w in ['experience', 'exp-', '\u043e\u043f\u044b\u0442']):
+                    continue
+                lower = txt.lower()
+                if any(w in lower for w in ['\u043e\u043f\u044b\u0442 \u0440\u0430\u0431\u043e\u0442\u044b', '\u043e\u0442 \u0434\u043e \u043b\u0435\u0442', '\u0433\u043e\u0434\u0430']):
+                    continue
                 has_num = bool(re.search(r'\d[\d\s]*', txt))
                 has_currency = any(c in txt for c in ['\u20bd', '\u0440\u0443\u0431', 'USD', 'EUR', '$', '\u20ac'])
                 if has_num and has_currency and len(txt) < 80:
