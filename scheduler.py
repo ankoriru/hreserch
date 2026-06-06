@@ -85,6 +85,38 @@ def parse_salary_text(text):
                 return {"from": nums_clean[0], "currency": currency}
     return None
 
+def _word_in_name(word, name):
+    """Check if word is present in name. Short words (<=3 chars) must be separate tokens.
+    Long words use prefix match (first 5 chars) to catch Russian declensions."""
+    if len(word) <= 3:
+        tokens = re.split(r'[^a-z\u0430-\u044f0-9]+', name)
+        return word in tokens
+    if len(word) >= 5:
+        prefix = word[:5]
+        tokens = re.split(r'[^a-z\u0430-\u044f0-9]+', name)
+        for token in tokens:
+            if len(token) >= 5 and token.startswith(prefix):
+                return True
+    return word in name
+
+def matches_any_query(vacancy_name, queries):
+    """Check if vacancy name matches any search query."""
+    if not vacancy_name or not queries:
+        return False
+    name_lower = vacancy_name.lower()
+    for query in queries:
+        if not query:
+            continue
+        qlower = query.lower()
+        # Direct substring match
+        if qlower in name_lower:
+            return True
+        # Word-by-word: all words must be present as tokens
+        words = [w.strip() for w in qlower.split() if w.strip()]
+        if words and all(_word_in_name(w, name_lower) for w in words):
+            return True
+    return False
+
 def find_salary_in_card(card):
     sal_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-compensation"})
     if sal_tag:
@@ -119,19 +151,6 @@ def parse_date_text(date_text):
         if nums:
             return (today - timedelta(days=int(nums[0]))).strftime("%Y-%m-%dT23:59:59+03:00")
     return today.strftime("%Y-%m-%dT23:59:59+03:00")
-
-def matches_query(vacancy_name, query):
-    if not vacancy_name or not query:
-        return False
-    name_lower = vacancy_name.lower()
-    query_lower = query.lower()
-    # Direct substring match first (e.g. "cio" matches "Chief Information Officer (CIO)")
-    if query_lower in name_lower:
-        return True
-    words = [w.strip() for w in query_lower.split() if w.strip()]
-    if not words:
-        return False
-    return all(word in name_lower for word in words)
 
 def fetch_vacancies_html(query, area_id, search_period=1):
     url = "https://hh.ru/search/vacancy"
@@ -512,6 +531,10 @@ def run_monitor_job(force=False):
                 continue
 
         print("[Scheduler] \u0412\u0441\u0435\u0433\u043e \u0443\u043d\u0438\u043a\u0430\u043b\u044c\u043d\u044b\u0445: {}".format(len(all_vacancies)))
+
+        # Post-filter: keep only vacancies matching at least one search query
+        all_vacancies = [v for v in all_vacancies if matches_any_query(v.get("name", ""), queries_ran)]
+        print("[Scheduler] После фильтра запросов: {}".format(len(all_vacancies)))
 
         if force:
             report_vacancies = all_vacancies
