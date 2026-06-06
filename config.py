@@ -1,11 +1,14 @@
 import json
+import re
 import shutil
 from pathlib import Path
 
+# Regex to remove Unicode surrogate characters (U+D800-U+DFFF)
+_SURROGATE_RE = re.compile(r'[\ud800-\udfff]')
+
 def _clean_surrogates(val):
-    """Remove Unicode surrogate characters from string values."""
     if isinstance(val, str):
-        return val.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+        return _SURROGATE_RE.sub('', val)
     elif isinstance(val, dict):
         return {k: _clean_surrogates(v) for k, v in val.items()}
     elif isinstance(val, list):
@@ -61,6 +64,8 @@ def load_config():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8", errors="replace") as f:
                 raw = f.read()
+                # Remove surrogate characters BEFORE json.loads
+                raw = _SURROGATE_RE.sub('', raw)
                 data = json.loads(raw)
                 data = _clean_surrogates(data)
                 for key, val in DEFAULT_CONFIG.items():
@@ -69,15 +74,21 @@ def load_config():
                     else:
                         cfg[key] = val
         except Exception as e:
-            print("[Config] Ошибка загрузки файла: {}".format(e))
+            print("[Config] Битый файл, используем defaults: {}".format(e))
+            try:
+                CONFIG_FILE.unlink()
+            except Exception:
+                pass
     return cfg
 
 def save_config(cfg):
     try:
         cfg = _clean_surrogates(cfg)
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=True, indent=2)
+        # Write as bytes to avoid surrogate encoding errors
+        json_bytes = json.dumps(cfg, ensure_ascii=True, indent=2).encode("ascii")
+        with open(CONFIG_FILE, "wb") as f:
+            f.write(json_bytes)
         print("[Config] Сохранено")
     except Exception as e:
         print("[Config] Ошибка сохранения: {}".format(e))

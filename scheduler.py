@@ -260,6 +260,13 @@ def _write_last_run(start_ts, new_count, has_new, queries, finished=True, error=
             last_run["finished_at"] = datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S")
         if error:
             last_run["error"] = str(error)
+        # Remove surrogate characters
+        for key in list(last_run.keys()):
+            val = last_run[key]
+            if isinstance(val, str):
+                last_run[key] = re.sub(r'[\ud800-\udfff]', '', val)
+            elif isinstance(val, list):
+                last_run[key] = [re.sub(r'[\ud800-\udfff]', '', s) if isinstance(s, str) else s for s in val]
         with open(OUTPUT_DIR / "last_run.json", "w", encoding="utf-8") as f:
             json.dump(last_run, f, ensure_ascii=True)
     except Exception as e:
