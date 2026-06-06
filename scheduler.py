@@ -66,6 +66,11 @@ def parse_salary_text(text):
     match = re.search(r'\u043e\u0442\s+(\d[\d\s]*)', text, re.IGNORECASE)
     if match:
         return {"from": int(match.group(1).replace(' ', '')), "currency": currency}
+    # Range with dash: "130 000 – 200 000 ₽" or "130 000 - 200 000 ₽"
+    match = re.search(r'(\d[\d\s]*)\s*[\u2013\u2014\-]\s*(\d[\d\s]*)', text)
+    if match:
+        return {"from": int(match.group(1).replace(' ', '')), "to": int(match.group(2).replace(' ', '')), "currency": currency}
+    # Fallback: any numbers with currency
     if any(c in text for c in ['\u20bd', '\u0440\u0443\u0431', 'USD', 'EUR', '$', '\u20ac']):
         nums = re.findall(r'\d[\d\s]*', text)
         nums_clean = [int(n.replace(' ', '')) for n in nums if n.strip().replace(' ', '').isdigit()]
@@ -202,13 +207,14 @@ def parse_html_vacancies(html):
                         break
             employer = emp_tag.get_text(strip=True, separator=' ') if emp_tag else "\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439"
             
-            # Salary: search wrapper text for numbers + currency
+            # Salary: search each span/div for numbers + currency
             salary = None
-            for line in wrapper_lines:
-                has_num = bool(re.search(r'\d[\d\s]*', line))
-                has_currency = any(c in line for c in ['\u20bd', '\u0440\u0443\u0431', 'USD', 'EUR', '$', '\u20ac'])
-                if has_num and has_currency and len(line) < 80:
-                    salary = parse_salary_text(line)
+            for tag in wrapper.find_all(["span", "div"]):
+                txt = tag.get_text(strip=True, separator=' ')
+                has_num = bool(re.search(r'\d[\d\s]*', txt))
+                has_currency = any(c in txt for c in ['\u20bd', '\u0440\u0443\u0431', 'USD', 'EUR', '$', '\u20ac'])
+                if has_num and has_currency and len(txt) < 80:
+                    salary = parse_salary_text(txt)
                     if salary:
                         break
             if not salary:
@@ -252,6 +258,8 @@ def send_telegram(token, chat_id, message, retries=3):
         print("[Telegram] SKIP: token={} chat={}".format(bool(token), bool(chat_id)))
         return False
     tg_url = "https://api.telegram.org/bot{}/sendMessage".format(token)
+    
+    # Try HTML parse_mode first
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(tg_url, data=data, headers={"Content-Type": "application/json"}, method="POST")
@@ -263,6 +271,20 @@ def send_telegram(token, chat_id, message, retries=3):
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:500]
             print("[Telegram] HTTP {} ERROR: {}".format(e.code, body))
+            if e.code == 400 and "can\'t parse entities" in body:
+                # HTML parse error — fallback to plain text
+                print("[Telegram] HTML parse error, trying plain text...")
+                import re as _re
+                plain = _re.sub(r'<[^>]+>', '', message)
+                payload2 = {"chat_id": chat_id, "text": plain, "disable_web_page_preview": True}
+                data2 = json.dumps(payload2).encode("utf-8")
+                req2 = urllib.request.Request(tg_url, data=data2, headers={"Content-Type": "application/json"}, method="POST")
+                try:
+                    with urllib.request.urlopen(req2, timeout=30) as resp2:
+                        print("[Telegram] Plain text HTTP {} OK".format(resp2.status))
+                        return resp2.status == 200
+                except Exception as e2:
+                    print("[Telegram] Plain text error: {}".format(e2))
             if 400 <= e.code < 500:
                 return False
         except Exception as e:
@@ -399,7 +421,7 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
             messages = []
             current = header
             for v in vacancies:
-                block = "\u2022 {}<br>\u041a\u043e\u043c\u043f\u0430\u043d\u0438\u044f: {}<br>\u0417\u0430\u0440\u043f\u043b\u0430\u0442\u0430: {}<br>\u0414\u0430\u0442\u0430: {}<br>\u0421\u0441\u044b\u043b\u043a\u0430: {}<br><br>".format(
+                block = "<b>{}</b>\n\u041a\u043e\u043c\u043f\u0430\u043d\u0438\u044f: {}\n\u0417\u0430\u0440\u043f\u043b\u0430\u0442\u0430: {}\n\u0414\u0430\u0442\u0430: {}\n\u0421\u0441\u044b\u043b\u043a\u0430: {}\n\n".format(
                     _escape_tg(v.get("name", "")), _escape_tg(v.get("employer", {}).get("name", "")),
                     _escape_tg(format_salary(v)), _escape_tg(format_datetime(v.get("published_at", ""))),
                     _escape_tg(v.get("alternate_url", "")))
