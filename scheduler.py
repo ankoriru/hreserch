@@ -281,7 +281,7 @@ def _build_reports(vacancies, date_str, time_str, search_period, cutoff_dt, quer
     today = datetime.now(TZ)
     # Text report
     lines = []
-    lines.append("\ud83d\udccb Вакансии \u2014 {}".format(date_str))
+    lines.append("[+] Вакансии \u2014 {}".format(date_str))
     lines.append("\u041f\u0435\u0440\u0438\u043e\u0434: {} \u0434\u043d. | \u041d\u0430\u0439\u0434\u0435\u043d\u043e: {}".format(search_period, count))
     lines.append("")
     for v in vacancies:
@@ -326,7 +326,7 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
 </head>
 <body>
 <div class="back"><a href="/dashboard">\u2190 \u041d\u0430\u0437\u0430\u0434</a></div>
-<h1>\ud83d\udccb \u041d\u043e\u0432\u044b\u0435 \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0438</h1>
+<h1>[+] Новые вакансии</h1>
 <p>\u041f\u0435\u0440\u0438\u043e\u0434: <strong>{} \u0434\u043d.</strong> | \u041d\u0430\u0439\u0434\u0435\u043d\u043e: <strong>{}</strong></p>
 {}
 <p class="meta">\u0421\u0444\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u043e {}</p>
@@ -360,7 +360,7 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
         token_tg = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
         if token_tg and chat_id:
-            header = "\ud83d\udccb \u041d\u043e\u0432\u044b\u0435 \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0438\n\u041f\u0435\u0440\u0438\u043e\u0434: {} \u0434\u043d. | \u041d\u0430\u0439\u0434\u0435\u043d\u043e: {}\n\n".format(search_period, count)
+            header = "[+] Новые вакансии\nПериод: {} дн. | Найдено: {}\n\n".format(search_period, count)
             messages = []
             current = header
             for v in vacancies:
