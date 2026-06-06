@@ -243,7 +243,7 @@ def _write_last_run(start_ts, new_count, has_new, queries, finished=True, error=
         if error:
             last_run["error"] = str(error)
         with open(OUTPUT_DIR / "last_run.json", "w", encoding="utf-8") as f:
-            json.dump(last_run, f, ensure_ascii=True)
+            json.dump(last_run, f, ensure_ascii=True, default=str)
     except Exception as e:
         print("[Scheduler] Ошибка записи last_run: {}".format(e))
 

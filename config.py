@@ -2,6 +2,16 @@ import json
 import shutil
 from pathlib import Path
 
+def _clean_surrogates(val):
+    """Remove Unicode surrogate characters from string values."""
+    if isinstance(val, str):
+        return val.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+    elif isinstance(val, dict):
+        return {k: _clean_surrogates(v) for k, v in val.items()}
+    elif isinstance(val, list):
+        return [_clean_surrogates(v) for v in val]
+    return val
+
 # Amvera provides persistent storage at /data
 # We always use /data/config.json if /data directory exists
 if Path("/data").exists():
@@ -49,25 +59,25 @@ def load_config():
     cfg = DEFAULT_CONFIG.copy()
     if CONFIG_FILE.exists():
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            with open(CONFIG_FILE, "r", encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+                data = json.loads(raw)
+                data = _clean_surrogates(data)
                 for key, val in DEFAULT_CONFIG.items():
                     if key in data:
                         cfg[key] = data[key]
                     else:
                         cfg[key] = val
         except Exception as e:
-            print("[Config] \u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438 \u0444\u0430\u0439\u043b\u0430: {}".format(e))
-    print("[Config] \u0417\u0430\u0433\u0440\u0443\u0436\u0435\u043d\u043e. \u0417\u0430\u043f\u0440\u043e\u0441\u044b: {} | \u0412\u0440\u0435\u043c\u044f: {} | \u041f\u0435\u0440\u0438\u043e\u0434: {}".format(
-        cfg.get("search_queries", []), cfg.get("schedule_time"), cfg.get("search_period")))
+            print("[Config] Ошибка загрузки файла: {}".format(e))
     return cfg
 
 def save_config(cfg):
     try:
-        # Ensure parent directory exists
+        cfg = _clean_surrogates(cfg)
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=True, indent=2)
-        print("[Config] \u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e \u0432 {}".format(CONFIG_FILE.absolute()))
+        print("[Config] Сохранено")
     except Exception as e:
-        print("[Config] \u041e\u0448\u0438\u0431\u043a\u0430 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u044f: {}".format(e))
+        print("[Config] Ошибка сохранения: {}".format(e))
