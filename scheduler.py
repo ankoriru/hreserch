@@ -212,7 +212,7 @@ def _fetch_html(url, cookiejar=None, timeout=30):
 def fetch_vacancies_html(query, area_id, search_period=1):
     """Fetch vacancies: 1) Public API first, 2) HTML with cookies fallback, 3) Mobile fallback."""
 
-    # ========== STRATEGY 1: Public API (no auth required) ==========
+    # ========== STRATEGY 1: Public API (HH-User-Agent header is REQUIRED) ==========
     try:
         time.sleep(random.uniform(1.0, 2.5))
         api_params = {
@@ -220,16 +220,21 @@ def fetch_vacancies_html(query, area_id, search_period=1):
             "area": area_id,
             "per_page": 100,
             "page": 0,
-            "order_by": "publication_time",
+            "period": search_period,
         }
         api_url = "https://api.hh.ru/vacancies?{}".format(urllib.parse.urlencode(api_params))
         print("[API URL] {}".format(api_url))
         req = urllib.request.Request(api_url, headers={
-            "User-Agent": _next_ua(),
+            "User-Agent": "VacancyMonitorBot/1.0 (contact@localhost)",
+            "HH-User-Agent": "VacancyMonitorBot/1.0 (contact@localhost)",
             "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",
         })
         with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            raw = resp.read()
+            if resp.headers.get('Content-Encoding') == 'gzip':
+                raw = gzip.decompress(raw)
+            data = json.loads(raw.decode("utf-8"))
             items = data.get("items", [])
             vacancies = []
             for item in items:
@@ -252,7 +257,8 @@ def fetch_vacancies_html(query, area_id, search_period=1):
             if vacancies:
                 return vacancies
     except urllib.error.HTTPError as e:
-        print("[API] HTTP {} \u0434\u043b\u044f '{}'".format(e.code, query))
+        body = e.read().decode("utf-8", errors="replace")[:300]
+        print("[API] HTTP {} \u0434\u043b\u044f '{}': {}".format(e.code, query, body))
     except Exception as e:
         print("[API] \u041e\u0448\u0438\u0431\u043a\u0430 '{}': {}".format(query, e))
 
