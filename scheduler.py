@@ -100,7 +100,8 @@ def _word_in_name(word, name):
     return word in name
 
 def matches_any_query(vacancy_name, queries):
-    """Check if vacancy name matches any search query."""
+    """Check if vacancy name matches any search query.
+    All words from query must be present in the name (long words via prefix match)."""
     if not vacancy_name or not queries:
         return False
     name_lower = vacancy_name.lower()
@@ -111,9 +112,17 @@ def matches_any_query(vacancy_name, queries):
         # Direct substring match
         if qlower in name_lower:
             return True
-        # Word-by-word: all words must be present as tokens
+        # Word-by-word: all words must be present
         words = [w.strip() for w in qlower.split() if w.strip()]
-        if words and all(_word_in_name(w, name_lower) for w in words):
+        if not words:
+            continue
+        # Single word query: check via prefix match
+        if len(words) == 1:
+            if _word_in_name(words[0], name_lower):
+                return True
+            continue
+        # Multi-word query: all words must match
+        if all(_word_in_name(w, name_lower) for w in words):
             return True
     return False
 
