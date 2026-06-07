@@ -1,12 +1,15 @@
+import gzip
 import html as html_module
 import json
 import os
+import random
 import re
 import socket
 import time
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
+from http.cookiejar import CookieJar
 from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import timezone
@@ -20,6 +23,17 @@ TZ = timezone("Europe/Moscow")
 
 # Hour-based cutoffs per period
 PERIOD_HOURS = {1: 24, 3: 72, 7: 168, 30: 720}
+
+# Rotate User-Agent to reduce CAPTCHA triggers
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
+]
+_ua_index = [0]  # mutable int for closure
 
 def is_workday():
     today = datetime.now(TZ).weekday()
@@ -85,6 +99,52 @@ def parse_salary_text(text):
                 return {"from": nums_clean[0], "currency": currency}
     return None
 
+def _word_in_name_strict(word, name):
+    """Strict word matching: word must appear as a token in name.
+    For long words (>=5 chars), prefix match of first 5 chars catches Russian declensions.
+    Does NOT use substring match (too permissive — e.g. 'it' in 'администратор')."""
+    if not word or not name:
+        return False
+    # Tokenize: split on non-alphanumeric (preserving Cyrillic)
+    tokens = re.split(r'[^a-z\u0430-\u044f0-9]+', name)
+    tokens = [t for t in tokens if t]
+    w = word.lower()
+    # Short word (<=3 chars): must match a token exactly
+    if len(w) <= 3:
+        return w in tokens
+    # Long word (>=5 chars): prefix match for declensions
+    if len(w) >= 5:
+        prefix = w[:5]
+        for token in tokens:
+            if len(token) >= 5 and token.lower().startswith(prefix):
+                return True
+    # Medium word (4 chars): exact token match or exact substring surrounded by boundaries
+    for token in tokens:
+        if token.lower() == w:
+            return True
+    return False
+
+def matches_any_query(vacancy_name, queries):
+    """Check if vacancy name matches any search query.
+    All words from query must be present in the name."""
+    if not vacancy_name or not queries:
+        return False
+    name_lower = vacancy_name.lower()
+    for query in queries:
+        if not query:
+            continue
+        qlower = query.lower()
+        # Direct substring match (whole query as phrase)
+        if qlower in name_lower:
+            return True
+        # Word-by-word: ALL words from query must be present
+        words = [w.strip() for w in qlower.split() if w.strip()]
+        if not words:
+            continue
+        if all(_word_in_name_strict(w, name_lower) for w in words):
+            return True
+    return False
+
 def find_salary_in_card(card):
     sal_tag = card.find("span", attrs={"data-qa": "vacancy-serp__vacancy-compensation"})
     if sal_tag:
@@ -120,61 +180,199 @@ def parse_date_text(date_text):
             return (today - timedelta(days=int(nums[0]))).strftime("%Y-%m-%dT23:59:59+03:00")
     return today.strftime("%Y-%m-%dT23:59:59+03:00")
 
-def matches_query(vacancy_name, query):
-    if not vacancy_name or not query:
-        return False
-    name_lower = vacancy_name.lower()
-    query_lower = query.lower()
-    # Direct substring match first (e.g. "cio" matches "Chief Information Officer (CIO)")
-    if query_lower in name_lower:
-        return True
-    words = [w.strip() for w in query_lower.split() if w.strip()]
-    if not words:
-        return False
-    return all(word in name_lower for word in words)
+# Proxy support: set HTTP_PROXY or HTTPS_PROXY env var
+def _get_proxy_opener(extra_handlers=()):
+    """Build urllib opener with optional HTTP proxy."""
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+    handlers = list(extra_handlers)
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({"https": proxy, "http": proxy}))
+        print("[Proxy] Using {}".format(proxy))
+    return urllib.request.build_opener(*handlers)
+
+def _has_proxy():
+    return bool(os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY"))
+
+def _next_ua():
+    ua = USER_AGENTS[_ua_index[0] % len(USER_AGENTS)]
+    _ua_index[0] += 1
+    return ua
+
+def _is_captcha(html):
+    return 'HHCaptcha' in html or 'captcha' in html.lower() or 'g-recaptcha' in html
+
+def _ua_headers():
+    return {
+        "User-Agent": _next_ua(),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.5,en;q=0.3",
+        "Accept-Encoding": "gzip, deflate",
+        "Referer": "https://hh.ru/",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "max-age=0",
+    }
+
+def _fetch_html(url, cookiejar=None, timeout=30):
+    """Fetch HTML with optional cookie jar. Returns (html, cookiejar)."""
+    req = urllib.request.Request(url, headers=_ua_headers())
+    handlers = []
+    if cookiejar is not None:
+        handlers.append(urllib.request.HTTPCookieProcessor(cookiejar))
+    opener = _get_proxy_opener(handlers)
+    with opener.open(req, timeout=timeout) as resp:
+        data = resp.read()
+        if resp.headers.get('Content-Encoding') == 'gzip':
+            data = gzip.decompress(data)
+        return data.decode("utf-8", errors="replace"), cookiejar
 
 def fetch_vacancies_html(query, area_id, search_period=1):
+    """Fetch vacancies: 1) Public API first, 2) HTML with cookies fallback, 3) Mobile fallback."""
+
+    # ========== STRATEGY 1: Public API (HH-User-Agent header is REQUIRED) ==========
+    try:
+        time.sleep(random.uniform(1.0, 2.5))
+        api_params = {
+            "text": query,
+            "area": area_id,
+            "per_page": 100,
+            "page": 0,
+            "period": search_period,
+        }
+        api_url = "https://api.hh.ru/vacancies?{}".format(urllib.parse.urlencode(api_params))
+        print("[API URL] {}".format(api_url))
+        req = urllib.request.Request(api_url, headers={
+            "User-Agent": "VacancyMonitorBot/1.0 (contact@localhost)",
+            "HH-User-Agent": "VacancyMonitorBot/1.0 (contact@localhost)",
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",
+        })
+        opener = _get_proxy_opener()
+        with opener.open(req, timeout=30) as resp:
+            raw = resp.read()
+            if resp.headers.get('Content-Encoding') == 'gzip':
+                raw = gzip.decompress(raw)
+            data = json.loads(raw.decode("utf-8"))
+            items = data.get("items", [])
+            vacancies = []
+            for item in items:
+                if not item or not item.get("id"):
+                    continue
+                salary = item.get("salary")
+                vac = {
+                    "id": str(item["id"]),
+                    "name": item.get("name", ""),
+                    "employer": {"name": (item.get("employer") or {}).get("name", "\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439")},
+                    "salary": {"from": salary.get("from"), "to": salary.get("to"), "currency": salary.get("currency", "RUR")} if salary else None,
+                    "published_at": item.get("published_at", ""),
+                    "alternate_url": item.get("alternate_url", ""),
+                }
+                # Shorten URL
+                vid = str(item["id"])
+                vac["alternate_url"] = "https://hh.ru/vacancy/{}".format(vid)
+                vacancies.append(vac)
+            print("[API] {} \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0439 \u0434\u043b\u044f '{}'".format(len(vacancies), query))
+            if vacancies:
+                return vacancies
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:300]
+        print("[API] HTTP {} \u0434\u043b\u044f '{}': {}".format(e.code, query, body))
+    except Exception as e:
+        print("[API] \u041e\u0448\u0438\u0431\u043a\u0430 '{}': {}".format(query, e))
+
+    # ========== STRATEGY 2: HTML scraping with cookies ==========
     url = "https://hh.ru/search/vacancy"
     params = {
         "text": query,
         "area": area_id,
         "order_by": "publication_time",
         "search_period": search_period,
-        "items_on_page": 20,
+        "items_on_page": 100,
     }
     full_url = "{}?{}".format(url, urllib.parse.urlencode(params))
     print("[HTML URL] {}".format(full_url))
-    req = urllib.request.Request(full_url, headers={
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html",
-        "Accept-Language": "ru-RU,ru;q=0.9",
-        "Referer": "https://hh.ru/",
-    })
+
+    # First visit homepage to get cookies
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            html = resp.read().decode("utf-8")
+        cj = http_cookiejar()
+        time.sleep(random.uniform(1.0, 2.0))
+        _, cj = _fetch_html("https://hh.ru/", cookiejar=cj)
+        time.sleep(random.uniform(1.5, 3.0))
+        html, _ = _fetch_html(full_url, cookiejar=cj)
+        if not _is_captcha(html):
             items = parse_html_vacancies(html)
-            print("[HTML] Получено {} вакансий".format(len(items)))
-            return items
-    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-        print("[HTML Connection Error] {}: {}".format(query, e))
-        return []
+            print("[HTML+cookies] {} \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0439 \u0434\u043b\u044f '{}'".format(len(items), query))
+            if items:
+                return items
+        else:
+            print("[HTML+cookies] CAPTCHA for '{}'".format(query))
     except Exception as e:
-        print("[HTML Error] {}: {}".format(query, e))
-        return []
+        print("[HTML+cookies] Error '{}': {}".format(query, e))
+
+    # ========== STRATEGY 3: Mobile version ==========
+    try:
+        time.sleep(random.uniform(2.0, 4.0))
+        mobile_url = "https://m.hh.ru/search/vacancy?{}".format(urllib.parse.urlencode(params))
+        print("[Mobile URL] {}".format(mobile_url))
+        req = urllib.request.Request(mobile_url, headers=_ua_headers())
+        opener = _get_proxy_opener()
+        with opener.open(req, timeout=30) as resp:
+            data = resp.read()
+            if resp.headers.get('Content-Encoding') == 'gzip':
+                data = gzip.decompress(data)
+            html = data.decode("utf-8", errors="replace")
+        if not _is_captcha(html):
+            items = parse_html_vacancies(html)
+            print("[Mobile] {} \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0439 \u0434\u043b\u044f '{}'".format(len(items), query))
+            return items
+        else:
+            print("[Mobile] CAPTCHA for '{}'".format(query))
+    except Exception as e:
+        print("[Mobile] Error '{}': {}".format(query, e))
+
+    if not _has_proxy():
+        print("[ALL] IP \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u043d hh.ru. \u041d\u0443\u0436\u043d\u043e \u043d\u0430\u0441\u0442\u0440\u043e\u0438\u0442\u044c HTTP_PROXY. \u041f\u0440\u0438\u043c\u0435\u0440: HTTP_PROXY=http://user:pass@proxy:8080")
+    print("[ALL] \u0412\u0441\u0435 \u0441\u0442\u0440\u0430\u0442\u0435\u0433\u0438\u0438 \u043d\u0435 \u0441\u0440\u0430\u0431\u043e\u0442\u0430\u043b\u0438 \u0434\u043b\u044f '{}'".format(query))
+    return []
+
+# Cookie jar factory for session handling
+def http_cookiejar():
+    return CookieJar()
 
 def parse_html_vacancies(html):
     soup = BeautifulSoup(html, "html.parser")
     vacancies = []
     
-    # Strategy: find all vacancy links by data-qa, then search salary/date in parent wrapper
+    # Strategy: find all vacancy links with multiple fallback selectors
     vacancy_links = soup.find_all("a", attrs={"data-qa": "serp-item__title"})
     if not vacancy_links:
         vacancy_links = soup.find_all("a", attrs={"data-qa": "vacancy-serp__vacancy-title"})
     if not vacancy_links:
+        # Try magritte class (new HH UI)
+        magritte_links = soup.find_all("a", class_=re.compile(r"magritte"), href=re.compile(r"/vacancy/\d+"))
+        vacancy_links = magritte_links
+    if not vacancy_links:
         vacancy_links = soup.find_all("a", href=re.compile(r"/vacancy/\d+"))
     
     print("[HTML Parser] Найдено {} ссылок".format(len(vacancy_links)))
+    
+    # Debug: if zero links, check what's in HTML
+    if len(vacancy_links) == 0:
+        # Check for captcha
+        if 'HHCaptcha' in html or 'captcha' in html.lower():
+            print("[HTML Parser] HH CAPTCHA detected!")
+        # Check for no results
+        if 'не найден' in html.lower() or 'not found' in html.lower():
+            print("[HTML Parser] No results page")
+        # Show first 200 chars of HTML
+        print("[HTML Parser] HTML preview: {}".format(html[:300].replace('\n', ' ')))
+        # Check all data-qa attributes
+        all_qa = set()
+        for tag in soup.find_all(attrs={"data-qa": True}):
+            all_qa.add(tag["data-qa"])
+        qa_with_title = [qa for qa in all_qa if 'title' in qa.lower() or 'vacancy' in qa.lower()]
+        print("[HTML Parser] data-qa with 'title'/'vacancy': {}".format(qa_with_title[:10]))
     
     for link_tag in vacancy_links:
         try:
@@ -274,15 +472,16 @@ def send_telegram(token, chat_id, message, retries=3):
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(tg_url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    opener = _get_proxy_opener()
     for attempt in range(1, retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with opener.open(req, timeout=30) as resp:
                 print("[Telegram] HTTP {} OK".format(resp.status))
                 return resp.status == 200
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:500]
             print("[Telegram] HTTP {} ERROR: {}".format(e.code, body))
-            if e.code == 400 and "can\'t parse entities" in body:
+            if e.code == 400 and "can't parse entities" in body:
                 # HTML parse error — fallback to plain text
                 print("[Telegram] HTML parse error, trying plain text...")
                 import re as _re
@@ -291,12 +490,12 @@ def send_telegram(token, chat_id, message, retries=3):
                 data2 = json.dumps(payload2).encode("utf-8")
                 req2 = urllib.request.Request(tg_url, data=data2, headers={"Content-Type": "application/json"}, method="POST")
                 try:
-                    with urllib.request.urlopen(req2, timeout=30) as resp2:
+                    with opener.open(req2, timeout=30) as resp2:
                         print("[Telegram] Plain text HTTP {} OK".format(resp2.status))
                         return resp2.status == 200
                 except Exception as e2:
                     print("[Telegram] Plain text error: {}".format(e2))
-            if 400 <= e.code < 500:
+            elif 400 <= e.code < 500:
                 return False
         except Exception as e:
             print("[Telegram] Attempt {}/{} error: {}".format(attempt, retries, e))
@@ -428,7 +627,7 @@ h1{{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}}
         token_tg = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
         if token_tg and chat_id:
-            header = "[+] Новые вакансии\nПериод: {} дн. | Найдено: {}\n\n".format(search_period, count)
+            header = "<b>[+] Новые вакансии</b><br>Период: {} дн. | Найдено: {}<br><br>".format(search_period, count)
             messages = []
             current = header
             for v in vacancies:
@@ -481,10 +680,12 @@ def run_monitor_job(force=False):
         all_vacancies = []
         seen_ids = set()
 
-        for query in cfg.get("search_queries", []):
+        for idx, query in enumerate(cfg.get("search_queries", [])):
+            if idx > 0:
+                time.sleep(random.uniform(3.0, 6.0))  # pause between queries to reduce rate-limit risk
             try:
                 items = fetch_vacancies_html(query, cfg["area_id"], search_period=search_period_days)
-                print('[Scheduler] \u0417\u0430\u043f\u0440\u043e\u0441 "{}" -> {} \u0448\u0442.'.format(query, len(items)))
+                passed_cutoff = 0
                 for item in items:
                     try:
                         vid = item.get("id")
@@ -502,16 +703,29 @@ def run_monitor_job(force=False):
                             pub_date = pub_str[:10] if pub_str else ""
                             if pub_date and pub_date < cutoff_dt.strftime("%Y-%m-%d"):
                                 continue
+                        passed_cutoff += 1
                         seen_ids.add(vid)
                         all_vacancies.append(item)
                     except Exception as inner_e:
                         print("[Scheduler] \u041e\u0448\u0438\u0431\u043a\u0430 \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u0438: {}".format(inner_e))
                         continue
+                print("[Scheduler] Запрос '{}' -> {} шт., прошло отсечку: {}".format(query, len(items), passed_cutoff))
             except Exception as query_e:
                 print("[Scheduler] \u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u043f\u0440\u043e\u0441\u0430 '{}': {}".format(query, query_e))
                 continue
 
-        print("[Scheduler] \u0412\u0441\u0435\u0433\u043e \u0443\u043d\u0438\u043a\u0430\u043b\u044c\u043d\u044b\u0445: {}".format(len(all_vacancies)))
+        print("[Scheduler] Всего уникальных: {}".format(len(all_vacancies)))
+        # Show first 5 vacancies before query filter
+        for v in all_vacancies[:5]:
+            print("[Scheduler]   > {} | pub={}".format(v.get("name", "")[:60], v.get("published_at", "")[:16]))
+
+        # Post-filter: keep only vacancies matching at least one search query
+        before_qf = len(all_vacancies)
+        dropped = [v for v in all_vacancies if not matches_any_query(v.get("name", ""), queries_ran)]
+        all_vacancies = [v for v in all_vacancies if matches_any_query(v.get("name", ""), queries_ran)]
+        print("[Scheduler] После фильтра запросов: {} (отброшено {})".format(len(all_vacancies), len(dropped)))
+        for v in dropped[:10]:
+            print("[Scheduler]   FILTERED OUT: {}".format(v.get("name", "")[:70]))
 
         if force:
             report_vacancies = all_vacancies
